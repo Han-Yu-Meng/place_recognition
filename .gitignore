@@ -2,5 +2,6 @@ build/*
 features/*
 grid_features/*
 matchs/*
+failures/*
 totalMapBag/*
 global_map.pcd
