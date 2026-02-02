@@ -1,5 +1,6 @@
 // match.cpp
 
+#include "bev_debugger.hpp"
 #include "lidar_simulator.hpp"
 #include "sc_module.hpp"
 #include <algorithm>
@@ -7,11 +8,11 @@
 #include <fstream>
 #include <iostream>
 #include <opencv2/opencv.hpp>
+#include <pcl/common/transforms.h>
 #include <pcl/console/print.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
-#include <pcl/common/transforms.h>
 #include <pcl/visualization/pcl_visualizer.h>
 #include <thread>
 #include <vector>
@@ -79,12 +80,11 @@ int main(int argc, char **argv) {
   // [修改] 分别指定数据库文件夹和查询（模拟位姿）文件夹
   std::vector<std::string> database_dirs = {
       "/home/steven/Data/place_recognition/grid_features/",
-      "/home/steven/Data/place_recognition/features/"
-      };
+      "/home/steven/Data/place_recognition/features/"};
   std::vector<std::string> query_dirs = {
       "/home/steven/Data/place_recognition/features/"
       // "/home/steven/Data/place_recognition/grid_features/"
-      };
+  };
 
   std::string map_path = "/home/steven/Data/place_recognition/global_map.pcd";
 
@@ -122,7 +122,8 @@ int main(int argc, char **argv) {
       }
 
       int id = 0;
-      bool is_360 = false; // [修改] 现在 grid_features 也是 180 度快照，不按 360 度处理
+      bool is_360 =
+          false; // [修改] 现在 grid_features 也是 180 度快照，不按 360 度处理
       try {
         id = std::stoi(fs::path(pcd_path).stem().string());
         // 即使 id >= 100000，用户现在也要求按 180 度 FOV 处理
@@ -205,7 +206,8 @@ int main(int argc, char **argv) {
     cv::Mat query_img = sc_manager->getScanContextVisual(q_sc);
 
     // 2. True SC (Ground Truth)
-    // [修复] 直接从 query 帧对应的路径加载 PCD 作为 GT 可视化，这样即使数据库只包含 grid_features 也能正常显示真值
+    // [修复] 直接从 query 帧对应的路径加载 PCD 作为 GT
+    // 可视化，这样即使数据库只包含 grid_features 也能正常显示真值
     cv::Mat true_img = cv::Mat::zeros(query_img.rows, query_img.cols, CV_8UC3);
     pcl::PointCloud<pcl::PointXYZ>::Ptr true_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
@@ -218,10 +220,11 @@ int main(int argc, char **argv) {
         true_img = sc_manager->getScanContextVisual(t_sc);
       }
     } else {
-      // 备选方案：如果 kf.pcd_path 不存在，尝试在数据库中寻找 ID 相同的作为 GT 显示
-      auto it =
-          std::find_if(database_keyframes.begin(), database_keyframes.end(),
-                       [&](const KeyFrame &db_kf) { return db_kf.id == kf.id; });
+      // 备选方案：如果 kf.pcd_path 不存在，尝试在数据库中寻找 ID 相同的作为 GT
+      // 显示
+      auto it = std::find_if(
+          database_keyframes.begin(), database_keyframes.end(),
+          [&](const KeyFrame &db_kf) { return db_kf.id == kf.id; });
 
       if (it != database_keyframes.end()) {
         if (pcl::io::loadPCDFile(it->pcd_path, *true_cloud) != -1) {
@@ -304,11 +307,13 @@ int main(int argc, char **argv) {
     // Match: Blue (0, 0, 255)
     if (!match_cloud->empty()) {
       // [要求] 根据估计出的旋转角（result.second）将匹配帧旋转对齐到 query 帧
-      pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_match(new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_match(
+          new pcl::PointCloud<pcl::PointXYZ>);
       Eigen::Affine3f transform = Eigen::Affine3f::Identity();
-      transform.rotate(Eigen::AngleAxisf(result.second, Eigen::Vector3f::UnitZ()));
+      transform.rotate(
+          Eigen::AngleAxisf(result.second, Eigen::Vector3f::UnitZ()));
       pcl::transformPointCloud(*match_cloud, *aligned_match, transform);
-      
+
       add_colored(aligned_match, 0, 0, 255);
     }
 
@@ -369,34 +374,60 @@ int main(int argc, char **argv) {
 
     // [新增] FAILED 状态下的复盘逻辑
     if (s_out == "FAIL") {
-      std::cout << "    >>> [REVIEW] Query ID " << kf.id << " failed." << std::endl;
-      
+      std::cout << "    >>> [REVIEW] Query ID " << kf.id << " failed."
+                << std::endl;
+
       // 1. 获取当前 Query 的描述子
       sc_manager->setUseFovMask(true);
       Eigen::MatrixXd q_sc = sc_manager->makeScancontext(*sim_cloud);
 
       // 2. 检查真实帧 (GT) 在数据库中的分数
-      auto it_gt = std::find_if(database_keyframes.begin(), database_keyframes.end(),
-                                [&](const KeyFrame &db_kf) { return db_kf.id == kf.id; });
+      auto it_gt = std::find_if(
+          database_keyframes.begin(), database_keyframes.end(),
+          [&](const KeyFrame &db_kf) { return db_kf.id == kf.id; });
       if (it_gt != database_keyframes.end()) {
         int gt_db_idx = std::distance(database_keyframes.begin(), it_gt);
         Eigen::MatrixXd gt_sc = sc_manager->polarcontexts_[gt_db_idx];
         auto gt_score = sc_manager->distanceBtnScanContext(q_sc, gt_sc);
-        std::cout << "        -> GroundTruth (ID " << it_gt->id << "): SC Dist = " 
-                  << std::fixed << std::setprecision(4) << gt_score.first 
-                  << ", SC Yaw Align = " << (gt_score.second * sc_manager->PC_UNIT_SECTORANGLE) << " deg" << std::endl;
+        std::cout << "        -> GroundTruth (ID " << it_gt->id
+                  << "): SC Dist = " << std::fixed << std::setprecision(4)
+                  << gt_score.first << ", SC Yaw Align = "
+                  << (gt_score.second * sc_manager->PC_UNIT_SECTORANGLE)
+                  << " deg" << std::endl;
       } else {
-        std::cout << "        -> GroundTruth: ID " << kf.id << " not found in database." << std::endl;
+        std::cout << "        -> GroundTruth: ID " << kf.id
+                  << " not found in database." << std::endl;
       }
 
       // 3. 检查匹配结果的分数
       if (result.first != -1) {
         Eigen::MatrixXd match_sc = sc_manager->polarcontexts_[result.first];
         auto match_score = sc_manager->distanceBtnScanContext(q_sc, match_sc);
-        std::cout << "        -> Erroneous Match (ID " << database_keyframes[result.first].id << "): SC Dist = " 
-                  << std::fixed << std::setprecision(4) << match_score.first 
-                  << ", SC Yaw Align = " << (match_score.second * sc_manager->PC_UNIT_SECTORANGLE) << " deg" << std::endl;
+        std::cout << "        -> Erroneous Match (ID "
+                  << database_keyframes[result.first].id
+                  << "): SC Dist = " << std::fixed << std::setprecision(4)
+                  << match_score.first << ", SC Yaw Align = "
+                  << (match_score.second * sc_manager->PC_UNIT_SECTORANGLE)
+                  << " deg" << std::endl;
       }
+
+      // [新增] BEV Debugger 可视化
+      pcl::PointCloud<pcl::PointXYZ>::Ptr debug_query = sim_cloud;
+      pcl::PointCloud<pcl::PointXYZ>::Ptr debug_gt(
+          new pcl::PointCloud<pcl::PointXYZ>);
+      if (fs::exists(kf.pcd_path)) {
+        if (pcl::io::loadPCDFile(kf.pcd_path, *debug_gt) != -1) {
+          filterOutliers(debug_gt);
+        }
+      }
+      BEVDebugger debugger;
+      debugger.WINDOW_SIZE = 1000;
+      debugger.SC_NUM_SECTORS = sc_manager->PC_NUM_SECTOR;
+      debugger.SC_NUM_RINGS = sc_manager->PC_NUM_RING;
+      std::cout << "        -> [DEBUG] Showing BEV diff map..." << std::endl;
+      debugger.showDifference(debug_query, debug_gt, 10.0f,
+                              "BEV Debugger");
+
       std::cout << "    <<<" << std::endl;
     }
   }
