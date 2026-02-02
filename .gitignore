@@ -1,0 +1,6 @@
+build/*
+features/*
+grid_features/*
+matchs/*
+totalMapBag/*
+global_map.pcd
