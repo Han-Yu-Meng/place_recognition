@@ -58,9 +58,9 @@ public:
   const double LIDAR_FLOOR_HEIGHT = -0.3;
 
   // Scan Context 尺寸
-  const int PC_NUM_RING = 20;
+  const int PC_NUM_RING = 15;
   const int PC_NUM_SECTOR = 40;
-  const double PC_MAX_RADIUS = 10.0; // 建议设为 10-20m 适合室内/局部调试
+  const double PC_MAX_RADIUS = 15.0; // 建议设为 10-20m 适合室内/局部调试
   const double PC_UNIT_SECTORANGLE = 360.0 / double(PC_NUM_SECTOR);
 
   // 匹配参数

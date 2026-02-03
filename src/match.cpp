@@ -88,8 +88,9 @@ int main(int argc, char **argv) {
   vtkObject::GlobalWarningDisplayOff();
 
   std::vector<std::string> database_dirs = {
-      // "/home/steven/Data/place_recognition/grid_features/"
-      "/home/steven/Data/place_recognition/features/"};
+      "/home/steven/Data/place_recognition/grid_features/"
+      // "/home/steven/Data/place_recognition/features/"
+    };
   std::vector<std::string> query_dirs = {
       "/home/steven/Data/place_recognition/features/"};
 
@@ -101,6 +102,37 @@ int main(int argc, char **argv) {
   if (!simulator->load_map(map_path, 0.05)) {
     return -1;
   }
+
+  // --- [Map Vis Init] ---
+  double min_x, max_x, min_y, max_y, min_z, max_z;
+  simulator->get_map_bounds(min_x, max_x, min_y, max_y, min_z, max_z);
+
+  int img_w = 1000, img_h = 1000;
+  float scale_x = (img_w - 100) / (max_x - min_x);
+  float scale_y = (img_h - 100) / (max_y - min_y);
+  float scale = std::min(scale_x, scale_y);
+  
+  double offset_x = (img_w - (max_x - min_x) * scale) / 2.0;
+  double offset_y = (img_h - (max_y - min_y) * scale) / 2.0;
+
+  auto worldToScreen = [&](double wx, double wy) -> cv::Point {
+      int sx = (int)((wx - min_x) * scale + offset_x);
+      int sy = img_h - (int)((wy - min_y) * scale + offset_y);
+      return cv::Point(sx, sy);
+  };
+
+  cv::Mat result_map = cv::Mat::zeros(img_h, img_w, CV_8UC3);
+  std::cout << "[Main] Generating Map Background..." << std::endl;
+  // 背景绘制
+  for (size_t i = 0; i < simulator->global_map_->size(); i += 5) { 
+    auto &pt = simulator->global_map_->points[i];
+    cv::Point p = worldToScreen(pt.x, pt.y);
+    if (p.x >= 0 && p.x < img_w && p.y >= 0 && p.y < img_h) {
+         uchar b = (uchar)std::clamp((pt.z - min_z) / (max_z - min_z) * 200 + 55, 55.0, 255.0);
+         result_map.at<cv::Vec3b>(p.y, p.x) = cv::Vec3b(b/2, b, b/2);
+    }
+  }
+  // --- [End Map Vis Init] ---
 
   // 加载 KeyFrames
   auto load_from_dirs = [&](const std::vector<std::string> &dirs) {
@@ -242,6 +274,23 @@ int main(int argc, char **argv) {
     std::cout << " | " << std::setw(8) << sim_time << " | " << std::setw(8) << det_time;
     std::cout << " | " << std::setw(6) << s_out << " |" << std::endl;
 
+    // --- [Vis Update] ---
+    cv::Point pt = worldToScreen(kf.pose(0,3), kf.pose(1,3));
+    cv::Scalar color = (s_out == "OK") ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
+    cv::circle(result_map, pt, 4, color, -1);
+    
+    if (s_out == "OK") {
+        Eigen::Vector3d match_pos = database_keyframes[result.first].pose.block<3, 1>(0, 3);
+        cv::Point pt_m = worldToScreen(match_pos.x(), match_pos.y());
+        cv::line(result_map, pt, pt_m, cv::Scalar(255, 255, 0), 1);
+    }
+    
+    if (total_tests % 5 == 0) {
+        cv::imshow("Match Result", result_map);
+        cv::waitKey(1);
+    }
+    // --- [End Vis Update] ---
+
     // --- FAILED 状态下的 BEV 可视化 ---
     if (s_out == "FAIL") {
       // 1. 加载真值点云 (Ground Truth)
@@ -306,5 +355,12 @@ int main(int argc, char **argv) {
   std::cout << "    Not Found: " << not_found << std::endl;
   std::cout << "    Accuracy: " << std::fixed << std::setprecision(2)
             << (100.0 * correct_matches / total_tests) << "%" << std::endl;
+
+  cv::imwrite(output_dir + "match_result_map.png", result_map);
+  cv::imshow("Match Result", result_map);
+  std::cout << "\n[Main] Visual result saved to " << output_dir + "match_result_map.png" << std::endl;
+  std::cout << "Press any key to exit..." << std::endl;
+  cv::waitKey(0);
+
   return 0;
 }
