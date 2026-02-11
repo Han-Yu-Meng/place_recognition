@@ -1,4 +1,4 @@
-// grid_feature_extractor.cpp
+// feature_selector.cpp
 
 #include "lidar_simulator.hpp"
 #include <filesystem>
@@ -63,36 +63,18 @@ void screenToWorld(int sx, int sy, double &wx, double &wy) {
 void updateDisplay() {
   std::lock_guard<std::mutex> lock(g_display_mutex);
 
-  // 从 base_map 截取并缩放
-  // 简单实现：重绘整个地图太慢，我们直接基于点云重绘或者操作 Image
-  // 为了平滑缩放，这里每次都重新基于点云投影可能太慢，建议基于 g_base_map
-  // 做仿射变换
-
   cv::Mat view = cv::Mat::zeros(g_img_h, g_img_w, CV_8UC3);
 
-  // 构建变换矩阵
-  // World -> Screen:
-  // x_s = (x_w - min_x) * s * z + off_x
-  // y_s = H - ((y_w - min_y) * s * z + off_y)
-
-  // 这里为了效率，我们利用 OpenCV 的 warpAffine 对 g_base_map 进行变换
-  // 但 g_base_map 分辨率可能不够，缩放变大时会模糊。为了高质量，还是重绘点吧。
-  // 但是点云量大时会卡。对于 1000x1000 窗口，重绘 10 万点非常快。
-
   if (g_simulator && g_simulator->global_map_) {
-    // 多线程渲染或降采样? 为了响应速度，这里只渲染视口内的点
     double visible_min_x, visible_max_x, visible_min_y, visible_max_y;
     screenToWorld(0, g_img_h, visible_min_x, visible_min_y);
     screenToWorld(g_img_w, 0, visible_max_x, visible_max_y);
 
-    // 简单扩一点边界
     visible_min_x -= 5.0;
     visible_max_x += 5.0;
     visible_min_y -= 5.0;
     visible_max_y += 5.0;
 
-    // 直接遍历所有点 (几十万点在 C++ 遍历很快，主要是 draw 耗时)
-    // 优化：预先计算 min_z, max_z
     static double min_z_m = -100, max_z_m = 100;
     static bool range_set = false;
     if (!range_set) {
@@ -297,7 +279,7 @@ void onMouse(int event, int x, int y, int flags, void *userdata) {
 
 // 加载轨迹
 void loadTrajectory() {
-  std::string feat_dir = "/home/steven/Data/place_recognition/features/";
+  std::string feat_dir = "/home/steven/Data/place_recognition_preprocess/features/";
   if (!fs::exists(feat_dir)) return;
 
   std::vector<std::string> odom_files;
@@ -321,8 +303,8 @@ void loadTrajectory() {
 }
 
 int main(int argc, char **argv) {
-  std::string map_path = "/home/steven/Data/place_recognition/global_map.pcd";
-  g_output_dir = "/home/steven/Data/place_recognition/grid_features/";
+  std::string map_path = "/home/steven/Data/place_recognition_preprocess/global_map.pcd";
+  g_output_dir = "/home/steven/Data/place_recognition_preprocess/grid_features/";
 
   if (!fs::exists(g_output_dir)) {
     fs::create_directories(g_output_dir);

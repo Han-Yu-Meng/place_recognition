@@ -20,7 +20,6 @@
 
 namespace fs = std::filesystem;
 
-// [新增] 角度归一化辅助函数
 inline double normalizeAngle(double rad) {
   while (rad > M_PI)
     rad -= 2.0 * M_PI;
@@ -45,22 +44,20 @@ LidarSimulator::Pose matrixToPose(const Eigen::Matrix4d &T) {
   return p;
 }
 
-// 辅助函数：离群点滤除
 void filterOutliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
   if (!cloud || cloud->empty())
     return;
 
-  // 确保输入输出分离，避免某些 PCL 版本下开启优化后的 aliasing 问题
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_v(new pcl::PointCloud<pcl::PointXYZ>);
-  
-  // 使用堆分配 (Heap Allocation) 防止 O2 优化下的栈对齐问题 (Stack Alignment Issues)
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_v(
+      new pcl::PointCloud<pcl::PointXYZ>);
+
   auto vox = std::make_shared<pcl::VoxelGrid<pcl::PointXYZ>>();
   vox->setInputCloud(cloud);
   vox->setLeafSize(0.15f, 0.15f, 0.15f);
   vox->filter(*cloud_v);
 
   if (cloud_v->empty()) {
-    cloud = cloud_v; // 返回空云
+    cloud = cloud_v;
     return;
   }
 
@@ -68,10 +65,11 @@ void filterOutliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
   sor->setInputCloud(cloud_v);
   sor->setMeanK(20);
   sor->setStddevMulThresh(2.0);
-  
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_sor(new pcl::PointCloud<pcl::PointXYZ>);
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_sor(
+      new pcl::PointCloud<pcl::PointXYZ>);
   sor->filter(*cloud_sor);
-  
+
   cloud = cloud_sor;
 }
 
@@ -88,13 +86,13 @@ int main(int argc, char **argv) {
   vtkObject::GlobalWarningDisplayOff();
 
   std::vector<std::string> database_dirs = {
-      "/home/steven/Data/place_recognition/grid_features/"
+      "/home/steven/Data/place_recognition_preprocess/grid_features/"
       // "/home/steven/Data/place_recognition/features/"
-    };
+  };
   std::vector<std::string> query_dirs = {
-      "/home/steven/Data/place_recognition/features/"};
+      "/home/steven/Data/place_recognition_preprocess/features/"};
 
-  std::string map_path = "/home/steven/Data/place_recognition/global_map.pcd";
+  std::string map_path = "/home/steven/Data/place_recognition_preprocess/global_map.pcd";
 
   auto sc_manager = std::make_unique<SCManager>();
   auto simulator = std::make_unique<LidarSimulator>();
@@ -111,25 +109,26 @@ int main(int argc, char **argv) {
   float scale_x = (img_w - 100) / (max_x - min_x);
   float scale_y = (img_h - 100) / (max_y - min_y);
   float scale = std::min(scale_x, scale_y);
-  
+
   double offset_x = (img_w - (max_x - min_x) * scale) / 2.0;
   double offset_y = (img_h - (max_y - min_y) * scale) / 2.0;
 
   auto worldToScreen = [&](double wx, double wy) -> cv::Point {
-      int sx = (int)((wx - min_x) * scale + offset_x);
-      int sy = img_h - (int)((wy - min_y) * scale + offset_y);
-      return cv::Point(sx, sy);
+    int sx = (int)((wx - min_x) * scale + offset_x);
+    int sy = img_h - (int)((wy - min_y) * scale + offset_y);
+    return cv::Point(sx, sy);
   };
 
   cv::Mat result_map = cv::Mat::zeros(img_h, img_w, CV_8UC3);
   std::cout << "[Main] Generating Map Background..." << std::endl;
   // 背景绘制
-  for (size_t i = 0; i < simulator->global_map_->size(); i += 5) { 
+  for (size_t i = 0; i < simulator->global_map_->size(); i += 5) {
     auto &pt = simulator->global_map_->points[i];
     cv::Point p = worldToScreen(pt.x, pt.y);
     if (p.x >= 0 && p.x < img_w && p.y >= 0 && p.y < img_h) {
-         uchar b = (uchar)std::clamp((pt.z - min_z) / (max_z - min_z) * 200 + 55, 55.0, 255.0);
-         result_map.at<cv::Vec3b>(p.y, p.x) = cv::Vec3b(b/2, b, b/2);
+      uchar b = (uchar)std::clamp((pt.z - min_z) / (max_z - min_z) * 200 + 55,
+                                  55.0, 255.0);
+      result_map.at<cv::Vec3b>(p.y, p.x) = cv::Vec3b(b / 2, b, b / 2);
     }
   }
   // --- [End Map Vis Init] ---
@@ -194,8 +193,8 @@ int main(int argc, char **argv) {
 
   int correct_matches = 0, incorrect_matches = 0, not_found = 0,
       total_tests = 0;
-  std::string output_dir = "/home/steven/Data/place_recognition/matchs/";
-  std::string failure_dir = "/home/steven/Data/place_recognition/failures/";
+  std::string output_dir = "/home/steven/Data/place_recognition_preprocess/matchs/";
+  std::string failure_dir = "/home/steven/Data/place_recognition_preprocess/failures/";
   fs::create_directories(output_dir);
   fs::create_directories(failure_dir);
 
@@ -212,7 +211,7 @@ int main(int argc, char **argv) {
 
   for (const auto &kf : query_keyframes) {
     auto sim_pose = matrixToPose(kf.pose);
-    
+
     auto t1 = std::chrono::steady_clock::now();
     auto sim_cloud = simulator->simulate_scan(sim_pose);
     auto t2 = std::chrono::steady_clock::now();
@@ -222,8 +221,8 @@ int main(int argc, char **argv) {
       continue;
     // filterOutliers(sim_cloud);
 
-    sc_manager->setUseFovMask(true); // Query 默认有盲区
-    
+    sc_manager->setUseFovMask(true);
+
     auto t3 = std::chrono::steady_clock::now();
     auto result = sc_manager->detectLoopClosureID(sim_cloud);
     auto t4 = std::chrono::steady_clock::now();
@@ -243,8 +242,7 @@ int main(int argc, char **argv) {
       dist = (gt_pos - match_pos).norm();
 
       double query_yaw = sim_pose.yaw;
-      double match_yaw =
-          matrixToPose(database_keyframes[result.first].pose).yaw;
+      double match_yaw = matrixToPose(database_keyframes[result.first].pose).yaw;
       double gt_yaw_diff = normalizeAngle(match_yaw - query_yaw);
       double est_yaw_diff = result.second;
       angle_error =
@@ -270,26 +268,28 @@ int main(int argc, char **argv) {
     else
       std::cout << std::setw(12) << angle_error << " | " << std::setw(8)
                 << dist;
-    
-    std::cout << " | " << std::setw(8) << sim_time << " | " << std::setw(8) << det_time;
+
+    std::cout << " | " << std::setw(8) << sim_time << " | " << std::setw(8)
+              << det_time;
     std::cout << " | " << std::setw(6) << s_out << " |" << std::endl;
 
     // --- [Vis Update] ---
-    cv::Point pt = worldToScreen(kf.pose(0,3), kf.pose(1,3));
-    cv::Scalar color = (s_out == "OK") ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
+    cv::Point pt = worldToScreen(kf.pose(0, 3), kf.pose(1, 3));
+    cv::Scalar color =
+        (s_out == "OK") ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
     cv::circle(result_map, pt, 4, color, -1);
-    
+
     if (s_out == "OK") {
-        Eigen::Vector3d match_pos = database_keyframes[result.first].pose.block<3, 1>(0, 3);
-        cv::Point pt_m = worldToScreen(match_pos.x(), match_pos.y());
-        cv::line(result_map, pt, pt_m, cv::Scalar(255, 255, 0), 1);
+      Eigen::Vector3d match_pos =
+          database_keyframes[result.first].pose.block<3, 1>(0, 3);
+      cv::Point pt_m = worldToScreen(match_pos.x(), match_pos.y());
+      cv::line(result_map, pt, pt_m, cv::Scalar(255, 255, 0), 1);
     }
-    
+
     if (total_tests % 5 == 0) {
-        cv::imshow("Match Result", result_map);
-        cv::waitKey(1);
+      cv::imshow("Match Result", result_map);
+      cv::waitKey(1);
     }
-    // --- [End Vis Update] ---
 
     // --- FAILED 状态下的 BEV 可视化 ---
     if (s_out == "FAIL") {
@@ -298,7 +298,7 @@ int main(int argc, char **argv) {
           new pcl::PointCloud<pcl::PointXYZ>);
       if (fs::exists(kf.pcd_path)) {
         if (pcl::io::loadPCDFile(kf.pcd_path, *true_cloud) != -1) {
-          filterOutliers(true_cloud);
+          // filterOutliers(true_cloud);
         }
       }
 
@@ -308,7 +308,7 @@ int main(int argc, char **argv) {
       if (result.first != -1) {
         if (pcl::io::loadPCDFile(database_keyframes[result.first].pcd_path,
                                  *match_cloud) != -1) {
-          filterOutliers(match_cloud);
+          // filterOutliers(match_cloud);
         }
       }
 
@@ -318,35 +318,45 @@ int main(int argc, char **argv) {
 
       // [新增] 保存调试信息到 failures 目录
       std::string base_fail = failure_dir + std::to_string(kf.id);
-      
+
       // A. 保存可视化图片 (使用 PNG 保证清晰度)
-      cv::imwrite(base_fail + "_bev.png", sc_manager->getCombinedBEVDebugView(sim_cloud, true_cloud, match_cloud));
-      cv::imwrite(base_fail + "_sc.png", sc_manager->getCombinedSCDebugView(sim_cloud, true_cloud, match_cloud));
+      cv::imwrite(base_fail + "_bev.png",
+                  sc_manager->getCombinedBEVDebugView(sim_cloud, true_cloud,
+                                                      match_cloud));
+      cv::imwrite(base_fail + "_sc.png",
+                  sc_manager->getCombinedSCDebugView(sim_cloud, true_cloud,
+                                                     match_cloud));
 
       // B. 保存三合一点云 (Query: Green, GT: Red, Match: Blue)
-      pcl::PointCloud<pcl::PointXYZRGB>::Ptr tri_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-      auto add_to_tri = [&](pcl::PointCloud<pcl::PointXYZ>::Ptr src, uint8_t r, uint8_t g, uint8_t b) {
-        if (!src) return;
+      pcl::PointCloud<pcl::PointXYZRGB>::Ptr tri_cloud(
+          new pcl::PointCloud<pcl::PointXYZRGB>);
+      auto add_to_tri = [&](pcl::PointCloud<pcl::PointXYZ>::Ptr src, uint8_t r,
+                            uint8_t g, uint8_t b) {
+        if (!src)
+          return;
         for (const auto &p : src->points) {
           pcl::PointXYZRGB pr;
-          pr.x = p.x; pr.y = p.y; pr.z = p.z;
-          pr.r = r; pr.g = g; pr.b = b;
+          pr.x = p.x;
+          pr.y = p.y;
+          pr.z = p.z;
+          pr.r = r;
+          pr.g = g;
+          pr.b = b;
           tri_cloud->push_back(pr);
         }
       };
-      add_to_tri(sim_cloud, 0, 255, 0);    // Green
-      add_to_tri(true_cloud, 255, 0, 0);   // Red
-      add_to_tri(match_cloud, 0, 0, 255);  // Blue
+      add_to_tri(sim_cloud, 0, 255, 0);   // Green
+      add_to_tri(true_cloud, 255, 0, 0);  // Red
+      add_to_tri(match_cloud, 0, 0, 255); // Blue
       if (!tri_cloud->empty()) {
         pcl::io::savePCDFileBinary(base_fail + "_triplet.pcd", *tri_cloud);
       }
 
-      std::cout << "    >>> [Failure Saved] ID: " << kf.id << " to " << failure_dir << std::endl;
+      std::cout << "    >>> [Failure Saved] ID: " << kf.id << " to "
+                << failure_dir << std::endl;
       cv::waitKey(1);
     }
   }
-
-  // ... 统计输出 ...
 
   std::cout << "\n[Main] Matching Summary:" << std::endl;
   std::cout << "    Total Queries: " << total_tests << std::endl;
@@ -358,7 +368,8 @@ int main(int argc, char **argv) {
 
   cv::imwrite(output_dir + "match_result_map.png", result_map);
   cv::imshow("Match Result", result_map);
-  std::cout << "\n[Main] Visual result saved to " << output_dir + "match_result_map.png" << std::endl;
+  std::cout << "\n[Main] Visual result saved to "
+            << output_dir + "match_result_map.png" << std::endl;
   std::cout << "Press any key to exit..." << std::endl;
   cv::waitKey(0);
 

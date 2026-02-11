@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <opencv2/opencv.hpp>
 #include <vector>
 
 // OctoMap
@@ -26,7 +27,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// 仿真策略枚举
 enum class SimulationMethod {
   RAY_CASTING, // 基于 OctoMap 的光线投射
                // (模拟真实扫描线分布，精度高，速度受分辨率影响)
@@ -38,32 +38,74 @@ class LidarSimulator {
 public:
   SimulationMethod method_ = SimulationMethod::RAY_CASTING;
 
-  // --- Mid-360 FOV Params ---
-  const double LIVOX_FOV_MIN_RAD = -12.0 * M_PI / 180.0;
-  const double LIVOX_FOV_MAX_RAD = 65.0 * M_PI / 180.0;
+  double LIVOX_FOV_MIN_RAD = -12.0 * M_PI / 180.0;
+  double LIVOX_FOV_MAX_RAD = 65.0 * M_PI / 180.0;
 
-  // Installation: 45 degree tilt (Pitch)
   // 如果雷达是斜着装的，这里定义倾角
   const double LIDAR_PITCH_OFFSET_RAD = 45 * M_PI / 180.0;
 
   const double GOLDEN_ANGLE = M_PI * (3.0 - sqrt(5.0));
 
   // Data
-  std::unique_ptr<octomap::OcTree> octomap_; // 用于 Ray Casting
-  pcl::PointCloud<pcl::PointXYZ>::Ptr
-      global_map_; // 用于 HPR (保留原始点云结构)
+  std::unique_ptr<octomap::OcTree> octomap_;       // 用于 Ray Casting
+  pcl::PointCloud<pcl::PointXYZ>::Ptr global_map_; // 用于 HPR
   bool map_loaded_ = false;
 
-  // Cache for optimize
   std::vector<Eigen::Vector3d> cached_scan_dirs_;
   int cached_num_pts_ = -1;
+
+  Eigen::Affine3d T_body_lidar_ = Eigen::Affine3d::Identity();
 
 public:
   struct Pose {
     double x, y, z, roll, pitch, yaw;
   };
 
-  LidarSimulator() : global_map_(new pcl::PointCloud<pcl::PointXYZ>) {}
+  LidarSimulator() : global_map_(new pcl::PointCloud<pcl::PointXYZ>) {
+    T_body_lidar_.linear() =
+        Eigen::AngleAxisd(45.0 * M_PI / 180.0, Eigen::Vector3d::UnitY())
+            .toRotationMatrix();
+  }
+
+  bool load_config(const std::string &config_path) {
+    cv::FileStorage fs(config_path, cv::FileStorage::READ);
+    if (!fs.isOpened()) {
+      std::cerr << "[Sim] Error: Could not open config file " << config_path
+                << std::endl;
+      return false;
+    }
+
+    if (!fs["lidar_fov_min"].empty()) {
+      double fov_min_deg;
+      fs["lidar_fov_min"] >> fov_min_deg;
+      LIVOX_FOV_MIN_RAD = fov_min_deg * M_PI / 180.0;
+    }
+
+    if (!fs["lidar_fov_max"].empty()) {
+      double fov_max_deg;
+      fs["lidar_fov_max"] >> fov_max_deg;
+      LIVOX_FOV_MAX_RAD = fov_max_deg * M_PI / 180.0;
+    }
+
+    // Load Extrinsic Matrix T_body_lidar
+    cv::Mat T_cv;
+    fs["T_body_lidar"] >> T_cv;
+    if (!T_cv.empty() && T_cv.rows == 4 && T_cv.cols == 4) {
+      for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++)
+          T_body_lidar_(r, c) = T_cv.at<double>(r, c);
+    }
+
+    // Invalidate cache
+    cached_num_pts_ = -1;
+
+    std::cout << "[Sim] Config loaded from " << config_path << std::endl;
+    std::cout << "[Sim] FOV: [" << LIVOX_FOV_MIN_RAD * 180.0 / M_PI << ", "
+              << LIVOX_FOV_MAX_RAD * 180.0 / M_PI << "] deg" << std::endl;
+    std::cout << "[Sim] T_body_lidar:\n" << T_body_lidar_.matrix() << std::endl;
+
+    return true;
+  }
 
   bool load_map(const std::string &path, double resolution = 0.05) {
     if (pcl::io::loadPCDFile(path, *global_map_) == -1) {
@@ -126,14 +168,11 @@ public:
     if (indices.empty())
       return false;
 
-    // 2. 在这些点中寻找最低点作为地面参考
-    // 为了鲁棒性，我们可以取最低的几个百分点的平均值，这里简单取最小值
     float min_z = 1e6;
     bool found = false;
 
     for (int idx : indices) {
       float z = global_map_->points[idx].z;
-      // 过滤掉可能的离群噪声点，可以增加一层简单的统计判断
       if (z < min_z) {
         min_z = z;
         found = true;
@@ -246,26 +285,18 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr out_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
     out_cloud->reserve(num_pts);
-    octomap::point3d origin(pose.x, pose.y, pose.z);
 
-    // 2. Precompute Transforms
-    // Body -> World
     Eigen::Affine3d T_world_body = getTransformFromPose(pose);
-    Eigen::Matrix3d R_world_body = T_world_body.rotation();
 
-    // Sensor -> Body (Fixed)
-    static const Eigen::Matrix3d R_body_sensor =
-        Eigen::AngleAxisd(LIDAR_PITCH_OFFSET_RAD, Eigen::Vector3d::UnitY())
-            .toRotationMatrix();
+    Eigen::Affine3d T_world_sensor = T_world_body * T_body_lidar_;
 
-    // Sensor -> World Rotation (Combined)
-    Eigen::Matrix3d R_world_sensor = R_world_body * R_body_sensor;
+    Eigen::Vector3d origin_eig = T_world_sensor.translation();
+    octomap::point3d origin(origin_eig.x(), origin_eig.y(), origin_eig.z());
 
-    // World -> Body Transform (Inverse)
+    Eigen::Matrix3d R_world_sensor = T_world_sensor.rotation();
+
     Eigen::Affine3d T_body_world = T_world_body.inverse();
 
-    // 3. Parallel Ray Casting
-    // Allocate temporary storage to avoid lock contention
     std::vector<pcl::PointXYZ> points_storage(num_pts);
     std::vector<bool> point_valid(num_pts, false);
 
@@ -305,14 +336,21 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr out_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
 
+    // Transform Body Pose
+    Eigen::Affine3d T_world_body = getTransformFromPose(pose);
+    Eigen::Affine3d T_world_sensor = T_world_body * T_body_lidar_;
+    Eigen::Vector3d sensor_pos = T_world_sensor.translation();
+
     // 1. CropBox: 先把全局地图中，距离当前位置太远的点切掉，减少 HPR 计算量
     pcl::PointCloud<pcl::PointXYZ>::Ptr local_area(
         new pcl::PointCloud<pcl::PointXYZ>);
     pcl::CropBox<pcl::PointXYZ> box_filter;
-    box_filter.setMin(
-        Eigen::Vector4f(pose.x - range, pose.y - range, pose.z - range, 1.0));
-    box_filter.setMax(
-        Eigen::Vector4f(pose.x + range, pose.y + range, pose.z + range, 1.0));
+    box_filter.setMin(Eigen::Vector4f(sensor_pos.x() - range,
+                                      sensor_pos.y() - range,
+                                      sensor_pos.z() - range, 1.0));
+    box_filter.setMax(Eigen::Vector4f(sensor_pos.x() + range,
+                                      sensor_pos.y() + range,
+                                      sensor_pos.z() + range, 1.0));
     box_filter.setInputCloud(global_map_);
     box_filter.filter(*local_area);
 
@@ -320,7 +358,7 @@ private:
       return out_cloud;
 
     // 2. Custom Hidden Point Removal
-    pcl::PointXYZ viewpoint_pt(pose.x, pose.y, pose.z);
+    pcl::PointXYZ viewpoint_pt(sensor_pos.x(), sensor_pos.y(), sensor_pos.z());
     pcl::PointIndices::Ptr visible_indices =
         hiddenPointRemoval(local_area, viewpoint_pt, range);
 
@@ -330,15 +368,8 @@ private:
     pcl::copyPointCloud(*local_area, visible_indices->indices, *hpr_cloud);
 
     // 3. 转换到 Body Frame 并应用 FOV 过滤
-    Eigen::Affine3d T_world_body = getTransformFromPose(pose);
     Eigen::Affine3d T_body_world = T_world_body.inverse();
-
-    // 安装倾角逆变换 (Body -> Sensor)
-    Eigen::AngleAxisd pitch_rot(LIDAR_PITCH_OFFSET_RAD,
-                                Eigen::Vector3d::UnitY());
-    Eigen::Affine3d T_sensor_body = Eigen::Affine3d::Identity();
-    T_sensor_body.linear() =
-        pitch_rot.toRotationMatrix().transpose(); // Inverse rotation
+    Eigen::Affine3d T_sensor_body = T_body_lidar_.inverse();
 
     for (const auto &pt_world : hpr_cloud->points) {
       // World -> Body
@@ -365,7 +396,6 @@ private:
     return out_cloud;
   }
 
-  // Helper: Pose to Transform Matrix
   Eigen::Affine3d getTransformFromPose(const Pose &p) {
     Eigen::Affine3d T = Eigen::Affine3d::Identity();
     T.translation() << p.x, p.y, p.z;
