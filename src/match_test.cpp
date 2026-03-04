@@ -1,4 +1,4 @@
-// match.cpp
+// match_test.cpp
 
 #include "lidar_simulator.hpp"
 #include "sc_module.hpp"
@@ -17,6 +17,8 @@
 #include <thread>
 #include <vector>
 #include <vtkObject.h>
+
+const std::string DATASET_DIR = "YunJing";
 
 namespace fs = std::filesystem;
 
@@ -85,17 +87,22 @@ int main(int argc, char **argv) {
   pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
   vtkObject::GlobalWarningDisplayOff();
 
+  fs::path root(PROJECT_ROOT_DIR);
+  fs::path dataset_dir = root / DATASET_DIR;
+
   std::vector<std::string> database_dirs = {
-      "/home/steven/Data/place_recognition_preprocess/grid_features/"
-      // "/home/steven/Data/place_recognition/features/"
+    (dataset_dir / "keyframes" / "simulated").string()
   };
   std::vector<std::string> query_dirs = {
-      "/home/steven/Data/place_recognition_preprocess/features/"};
+    (dataset_dir / "keyframes" / "on_route").string()
+  };
 
-  std::string map_path = "/home/steven/Data/place_recognition_preprocess/global_map.pcd";
+  std::string map_path = (dataset_dir / "global_map.pcd").string();
 
   auto sc_manager = std::make_unique<SCManager>();
   auto simulator = std::make_unique<LidarSimulator>();
+
+  simulator->load_config((dataset_dir / "lidar_config.yaml").string());
 
   if (!simulator->load_map(map_path, 0.05)) {
     return -1;
@@ -193,10 +200,10 @@ int main(int argc, char **argv) {
 
   int correct_matches = 0, incorrect_matches = 0, not_found = 0,
       total_tests = 0;
-  std::string output_dir = "/home/steven/Data/place_recognition_preprocess/matchs/";
-  std::string failure_dir = "/home/steven/Data/place_recognition_preprocess/failures/";
-  fs::create_directories(output_dir);
+    
+  std::string failure_dir = (dataset_dir / "failures").string() + "/";
   fs::create_directories(failure_dir);
+
 
   std::cout << "\n[Main] Starting Simulation & Verification..." << std::endl;
   std::cout << "| " << std::setw(6) << "GT ID"
@@ -215,7 +222,8 @@ int main(int argc, char **argv) {
     auto t1 = std::chrono::steady_clock::now();
     auto sim_cloud = simulator->simulate_scan(sim_pose);
     auto t2 = std::chrono::steady_clock::now();
-    double sim_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    double sim_time =
+        std::chrono::duration<double, std::milli>(t2 - t1).count();
 
     if (sim_cloud->empty())
       continue;
@@ -226,7 +234,8 @@ int main(int argc, char **argv) {
     auto t3 = std::chrono::steady_clock::now();
     auto result = sc_manager->detectLoopClosureID(sim_cloud);
     auto t4 = std::chrono::steady_clock::now();
-    double det_time = std::chrono::duration<double, std::milli>(t4 - t3).count();
+    double det_time =
+        std::chrono::duration<double, std::milli>(t4 - t3).count();
 
     // --- 状态判定 ---
     std::string s_out = "FAIL";
@@ -242,7 +251,8 @@ int main(int argc, char **argv) {
       dist = (gt_pos - match_pos).norm();
 
       double query_yaw = sim_pose.yaw;
-      double match_yaw = matrixToPose(database_keyframes[result.first].pose).yaw;
+      double match_yaw =
+          matrixToPose(database_keyframes[result.first].pose).yaw;
       double gt_yaw_diff = normalizeAngle(match_yaw - query_yaw);
       double est_yaw_diff = result.second;
       angle_error =
@@ -366,10 +376,10 @@ int main(int argc, char **argv) {
   std::cout << "    Accuracy: " << std::fixed << std::setprecision(2)
             << (100.0 * correct_matches / total_tests) << "%" << std::endl;
 
-  cv::imwrite(output_dir + "match_result_map.png", result_map);
+  cv::imwrite(dataset_dir + "match_result_map.png", result_map);
   cv::imshow("Match Result", result_map);
   std::cout << "\n[Main] Visual result saved to "
-            << output_dir + "match_result_map.png" << std::endl;
+            << dataset_dir + "match_result_map.png" << std::endl;
   std::cout << "Press any key to exit..." << std::endl;
   cv::waitKey(0);
 

@@ -54,6 +54,7 @@ public:
   std::vector<Eigen::Vector3d> cached_scan_dirs_;
   int cached_num_pts_ = -1;
 
+  std::vector<Eigen::Affine3d> T_body_lidars_;
   Eigen::Affine3d T_body_lidar_ = Eigen::Affine3d::Identity();
 
 public:
@@ -87,13 +88,47 @@ public:
       LIVOX_FOV_MAX_RAD = fov_max_deg * M_PI / 180.0;
     }
 
-    // Load Extrinsic Matrix T_body_lidar
-    cv::Mat T_cv;
-    fs["T_body_lidar"] >> T_cv;
-    if (!T_cv.empty() && T_cv.rows == 4 && T_cv.cols == 4) {
-      for (int r = 0; r < 4; r++)
-        for (int c = 0; c < 4; c++)
-          T_body_lidar_(r, c) = T_cv.at<double>(r, c);
+    // Load Extrinsic Matrices
+    T_body_lidars_.clear();
+    cv::FileNode lidars_node = fs["T_body_lidars"];
+    if (lidars_node.isSeq()) {
+      for (cv::FileNodeIterator it = lidars_node.begin(); it != lidars_node.end();
+           ++it) {
+        cv::FileNode node = *it;
+        if (node.isMap()) {
+          // Parse X, Y, Z, Roll, Pitch, Yaw (degrees)
+          Pose p;
+          p.x = (double)node["x"];
+          p.y = (double)node["y"];
+          p.z = (double)node["z"];
+          p.roll = (double)node["roll"] * M_PI / 180.0;
+          p.pitch = (double)node["pitch"] * M_PI / 180.0;
+          p.yaw = (double)node["yaw"] * M_PI / 180.0;
+          T_body_lidars_.push_back(getTransformFromPose(p));
+        } else {
+          cv::Mat Mi;
+          node >> Mi;
+          if (!Mi.empty() && Mi.rows == 4 && Mi.cols == 4) {
+            Eigen::Affine3d Ti = Eigen::Affine3d::Identity();
+            for (int r = 0; r < 4; r++)
+              for (int c = 0; c < 4; c++)
+                Ti(r, c) = Mi.at<double>(r, c);
+            T_body_lidars_.push_back(Ti);
+          }
+        }
+      }
+    }
+
+    if (T_body_lidars_.empty()) {
+      // Load Single Extrinsic Matrix T_body_lidar (backward compatibility)
+      cv::Mat T_cv;
+      fs["T_body_lidar"] >> T_cv;
+      if (!T_cv.empty() && T_cv.rows == 4 && T_cv.cols == 4) {
+        for (int r = 0; r < 4; r++)
+          for (int c = 0; c < 4; c++)
+            T_body_lidar_(r, c) = T_cv.at<double>(r, c);
+      }
+      T_body_lidars_.push_back(T_body_lidar_);
     }
 
     // Invalidate cache
@@ -102,7 +137,7 @@ public:
     std::cout << "[Sim] Config loaded from " << config_path << std::endl;
     std::cout << "[Sim] FOV: [" << LIVOX_FOV_MIN_RAD * 180.0 / M_PI << ", "
               << LIVOX_FOV_MAX_RAD * 180.0 / M_PI << "] deg" << std::endl;
-    std::cout << "[Sim] T_body_lidar:\n" << T_body_lidar_.matrix() << std::endl;
+    std::cout << "[Sim] Num Lidars: " << T_body_lidars_.size() << std::endl;
 
     return true;
   }
@@ -194,11 +229,24 @@ public:
     if (!map_loaded_)
       return std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
-    if (method_ == SimulationMethod::RAY_CASTING) {
-      return simulate_scan_raycast(pose, num_pts);
-    } else {
-      return simulate_scan_hpr(pose, 100);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr combined_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+
+    for (const auto &T : T_body_lidars_) {
+      // Temporarily set T_body_lidar_ for internal scan methods
+      T_body_lidar_ = T;
+
+      pcl::PointCloud<pcl::PointXYZ>::Ptr scan;
+      if (method_ == SimulationMethod::RAY_CASTING) {
+        // Divide num_pts among lidars to maintain similar density
+        scan = simulate_scan_raycast(pose, num_pts / T_body_lidars_.size());
+      } else {
+        scan = simulate_scan_hpr(pose, 100);
+      }
+      *combined_cloud += *scan;
     }
+
+    return combined_cloud;
   }
 
 private:

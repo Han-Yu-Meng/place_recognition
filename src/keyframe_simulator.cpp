@@ -1,4 +1,4 @@
-// feature_selector.cpp
+// keyframe_simulator.cpp
 
 #include "lidar_simulator.hpp"
 #include <filesystem>
@@ -9,24 +9,21 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-
-namespace fs = std::filesystem;
-
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
 
+const std::string DATASET_DIR = "YunJing";
+
 namespace fs = std::filesystem;
 
-// 异步任务处理类
 struct ExtractTask {
   double world_x, world_y;
   int display_x, display_y;
 };
 
-// 全局变量用于鼠标回调
 LidarSimulator *g_simulator;
 std::string g_output_dir;
 int g_id_counter = 100000;
@@ -179,21 +176,15 @@ void processTasks() {
                   << pose.z << "\n";
         odom_file << 0.0 << " " << 0.0 << " " << 0.0 << " " << 1.0 << "\n";
         odom_file.close();
-
+        
         g_id_counter++;
         any_saved = true;
       }
       success = any_saved;
     }
 
-    // --- 更新 UI 结果 ---
     {
       std::lock_guard<std::mutex> lock(g_display_mutex);
-      // 这里我们不能直接画在 g_display_map 上，因为它随时被重绘
-      // 应该不仅画在当前帧，最好有一个结果列表，updateDisplay 时统一画
-      // 简单处理：我们只打印，并在下一次 updateDisplay
-      // 时不体现（因为这是异步的） 更好的做法是维护一个 std::vector<ResultMark>
-      // g_marks; 但为了简单，我们暂不保存永久标记，只在控制台输出完成
       if (success)
         std::cout << "[Async] Task Finished: ID Range saved." << std::endl;
       else
@@ -218,15 +209,9 @@ void onMouse(int event, int x, int y, int flags, void *userdata) {
     if (g_zoom_factor > 20.0f)
       g_zoom_factor = 20.0f;
 
-    // 保持鼠标指向的世界坐标不变
-    // world_x = min_x + (x - off_x) / (s * z)
-    // off_x_new = x - (world_x - min_x) * s * z_new
-
-    // 1. Calculate world pos under mouse BEFORE zoom
     double wx, wy;
     screenToWorld(x, y, wx, wy);
 
-    // 2. Calculate new offset to keep wx, wy at screen x, y
     g_offset_x = x - (wx - g_min_x) * g_scale * g_zoom_factor;
     g_offset_y = (g_img_h - y) - (wy - g_min_y) * g_scale * g_zoom_factor;
 
@@ -235,7 +220,6 @@ void onMouse(int event, int x, int y, int flags, void *userdata) {
     return;
   }
 
-  // 拖拽平移 (中键或右键)
   static int prev_x = -1, prev_y = -1;
   if (event == cv::EVENT_MBUTTONDOWN || event == cv::EVENT_RBUTTONDOWN) {
     prev_x = x;
@@ -277,9 +261,10 @@ void onMouse(int event, int x, int y, int flags, void *userdata) {
   }
 }
 
-// 加载轨迹
 void loadTrajectory() {
-  std::string feat_dir = "/home/steven/Data/place_recognition_preprocess/features/";
+  fs::path root(PROJECT_ROOT_DIR);
+
+  std::string feat_dir = (root / DATASET_DIR / "features").string();
   if (!fs::exists(feat_dir)) return;
 
   std::vector<std::string> odom_files;
@@ -303,14 +288,18 @@ void loadTrajectory() {
 }
 
 int main(int argc, char **argv) {
-  std::string map_path = "/home/steven/Data/place_recognition_preprocess/global_map.pcd";
-  g_output_dir = "/home/steven/Data/place_recognition_preprocess/grid_features/";
+  fs::path root(PROJECT_ROOT_DIR);
+  fs::path dataset_dir = root / DATASET_DIR;
+
+  std::string map_path = (dataset_dir / "global_map.pcd").string();
+  g_output_dir = (dataset_dir / "keyframes" / "simulated").string() + "/";
 
   if (!fs::exists(g_output_dir)) {
     fs::create_directories(g_output_dir);
   }
 
   LidarSimulator simulator;
+  simulator.load_config((dataset_dir / "lidar_config.yaml").string());
   if (!simulator.load_map(map_path, 0.05)) {
     return -1;
   }
@@ -322,18 +311,15 @@ int main(int argc, char **argv) {
   simulator.get_map_bounds(g_min_x, g_max_x, g_min_y, g_max_y, min_z_m,
                            max_z_m);
 
-  // 计算初始缩放比例
   float scale_x = (g_img_w - 100.0f) / (g_max_x - g_min_x);
   float scale_y = (g_img_h - 100.0f) / (g_max_y - g_min_y);
   g_scale = std::min(scale_x, scale_y);
 
-  // 初始偏移，居中
   g_offset_x = (g_img_w - (g_max_x - g_min_x) * g_scale) / 2.0;
   g_offset_y = (g_img_h - (g_max_y - g_min_y) * g_scale) / 2.0;
 
   g_display_map = cv::Mat::zeros(g_img_h, g_img_w, CV_8UC3);
 
-  // 启动后台工作线程
   std::thread worker(processTasks);
 
   std::cout << "\n==============================================" << std::endl;
@@ -348,7 +334,6 @@ int main(int argc, char **argv) {
   cv::namedWindow("Grid Feature Extractor - Interactive", cv::WINDOW_NORMAL);
   cv::setMouseCallback("Grid Feature Extractor - Interactive", onMouse, NULL);
 
-  // 初始渲染
   updateDisplay();
 
   while (true) {

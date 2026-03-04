@@ -5,7 +5,7 @@ import sys
 import math
 import numpy as np
 import open3d as o3d
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R, Slerp
 from collections import deque
 import time
 
@@ -16,8 +16,12 @@ import rosbag2_py
 import sensor_msgs_py.point_cloud2 as pc2
 
 # ================= 配置参数 =================
-BAG_PATH = 'totalMapBag'       # Bag 文件夹路径
-OUTPUT_DIR = './'              # 主输出文件夹
+DATASET_NAME = 'YunJing'                   # 数据集名称（主文件夹）
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
+
+BAG_PATH = os.path.join(DATASET_ROOT, 'bag') # Bag 文件夹路径（现在在子文件夹中）
+OUTPUT_DIR = DATASET_ROOT                    # 主输出文件夹
 TOPIC_CLOUD = '/cloud_registered_body'
 TOPIC_ODOM = '/Odometry'
 
@@ -34,15 +38,65 @@ LIVOX_FOV_MIN_RAD = np.radians(-7.0)
 LIVOX_FOV_MAX_RAD = np.radians(65.0)
 INSTALL_PITCH_DEG = 45.0       # 安装角度 (度)
 
+# --- 静态变换 (odom -> lidar_odom) ---
+# 用于对 body 系点云进行修正
+STATIC_TRANS = np.array([0.5496, 0.2400, 0.1934])
+STATIC_QUAT = np.array([0.0, 0.130526, 0.0, 0.991445]) # x, y, z, w
+
+def get_static_tf():
+    rot = R.from_quat(STATIC_QUAT).as_matrix()
+    T = np.eye(4)
+    T[:3, :3] = rot
+    T[:3, 3] = STATIC_TRANS
+    return T
+
+T_BASE_TO_LIDAR = get_static_tf()
+
+class OdomBuffer:
+    def __init__(self, max_size=1000):
+        self.buffer = [] # list of (time, pose_matrix)
+        self.max_size = max_size
+        
+    def add(self, time_s, pose_matrix):
+        self.buffer.append((time_s, pose_matrix))
+        if len(self.buffer) > self.max_size:
+            self.buffer.pop(0)
+            
+    def get_interpolated_pose(self, time_s):
+        if not self.buffer:
+            return None
+        if time_s <= self.buffer[0][0]:
+            return self.buffer[0][1]
+        if time_s >= self.buffer[-1][0]:
+            return self.buffer[-1][1]
+            
+        for i in range(len(self.buffer) - 1):
+            t0, T0 = self.buffer[i]
+            t1, T1 = self.buffer[i+1]
+            if t0 <= time_s <= t1:
+                ratio = (time_s - t0) / (t1 - t0)
+                trans = (1 - ratio) * T0[:3, 3] + ratio * T1[:3, 3]
+                
+                # SLERP 旋转插值
+                rots = R.from_matrix([T0[:3, :3], T1[:3, :3]])
+                slerp = Slerp([t0, t1], rots)
+                interp_rot = slerp([time_s]).as_matrix()[0]
+                
+                T = np.eye(4)
+                T[:3, :3] = interp_rot
+                T[:3, 3] = trans
+                return T
+        return self.buffer[-1][1]
+
 def create_output_dirs(mode):
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
     
     if mode == 'keyframe':
-        feature_dir = os.path.join(OUTPUT_DIR, 'features')
-        if not os.path.exists(feature_dir):
-            os.makedirs(feature_dir)
-        return feature_dir, None
+        on_route_dir = os.path.join(OUTPUT_DIR, 'keyframes', 'on_route')
+        if not os.path.exists(on_route_dir):
+            os.makedirs(on_route_dir)
+        return on_route_dir, None
     else:
         return None, OUTPUT_DIR
 
@@ -203,7 +257,7 @@ def main():
     # ================= 用户输入交互 =================
     print("==========================================")
     print("请选择运行模式:")
-    print("  [1] 提取关键帧特征 (生成 features/*.pcd, 应用 FOV 裁剪)")
+    print("  [1] 提取关键帧特征 (生成 keyframes/on_route/*.pcd, 应用 FOV 裁剪)")
     print("  [2] 构建全局地图 (生成 global_map.pcd, 去除动态障碍物)")
     print("==========================================")
     
@@ -211,15 +265,15 @@ def main():
     
     if mode_input == '1':
         mode = 'keyframe'
-        print(">> 已选择: 关键帧提取模式 (应用 FOV 模拟)")
+        print(f">> 已选择: 关键帧提取模式 (回访数据来自: {BAG_PATH})")
     elif mode_input == '2':
         mode = 'map'
-        print(">> 已选择: 全局地图构建模式 (应用动态滤除)")
+        print(f">> 已选择: 全局地图构建模式 (回访数据来自: {BAG_PATH})")
     else:
         print("输入无效，退出程序。")
         return
 
-    feature_dir, _ = create_output_dirs(mode)
+    on_route_dir, _ = create_output_dirs(mode)
         
     storage_options, converter_options = get_rosbag_options(BAG_PATH)
     reader = rosbag2_py.SequentialReader()
@@ -235,6 +289,7 @@ def main():
         bag_start_time_ns = metadata.starting_time.nanoseconds_since_epoch
     
     last_odom_msg = None
+    odom_buffer = OdomBuffer()
     last_keyframe_pose = None
     
     keyframe_buffer = deque(maxlen=ACCUMULATE_FRAMES) 
@@ -251,23 +306,30 @@ def main():
         if topic == TOPIC_ODOM:
             msg_type = get_message(type_map[topic])
             last_odom_msg = deserialize_message(data, msg_type)
+            odom_buffer.add(current_time_s, odom_to_matrix(last_odom_msg))
             
         elif topic == TOPIC_CLOUD:
             if last_odom_msg is None: continue
+            
+            # 实时打印进度
+            print(f"\r[Processing] Bag Time: {current_time_s:8.2f}s", end='', flush=True)
                 
             msg_type = get_message(type_map[topic])
             cloud_msg = deserialize_message(data, msg_type)
             
-            T_curr = odom_to_matrix(last_odom_msg)
-            current_pcd_body = msg_to_pcd(cloud_msg)
-            if current_pcd_body is None: continue
+            current_pcd_lidar = msg_to_pcd(cloud_msg)
+            if current_pcd_lidar is None: continue
+
+            T_curr = odom_buffer.get_interpolated_pose(current_time_s)
+            if T_curr is None: T_curr = odom_to_matrix(last_odom_msg)
             
             # ---------------------------------------------------------
             # 模式 2: 全局地图数据收集
             # ---------------------------------------------------------
             if mode == 'map':
-                pcd_world = copy_pcd(current_pcd_body)
+                pcd_world = copy_pcd(current_pcd_lidar)
                 pcd_world.transform(T_curr)
+                pcd_world.transform(T_BASE_TO_LIDAR)
                 pcd_world = pcd_world.voxel_down_sample(voxel_size=0.05) 
                 
                 points_np = np.asarray(pcd_world.points)
@@ -280,7 +342,7 @@ def main():
             # 模式 1 & 2: 关键帧判断逻辑 (模式2仅用于推进，不保存)
             # ---------------------------------------------------------
             current_frame_data = {
-                'pcd': current_pcd_body, # 这里的 PCD 是 Body Frame
+                'pcd': current_pcd_lidar, # 这里的 PCD 是 Body Frame
                 'pose': T_curr,
                 'time_s': current_time_s
             }
@@ -301,22 +363,33 @@ def main():
                         # 1. 累积点云 (结果在当前 Keyframe 的 Body Frame)
                         accumulated_pcd = accumulate_pcds(keyframe_buffer, T_curr)
                         
-                        # 2. 应用 FOV 裁剪 (模拟 Sensor 视野)
-                        accumulated_pcd = apply_fov_filter(accumulated_pcd)
+                        # 2. 应用外部修正 (Body -> Lidar_Odom)
+                        # 为了让关键帧的点云与全局地图对齐，需要应用 T_BASE_TO_LIDAR 变换
+                        accumulated_pcd.transform(T_BASE_TO_LIDAR)
                         
-                        # 3. 降采样并保存
-                        feature_filename = os.path.join(feature_dir, f"{keyframe_count:06d}.pcd")
-                        pose_filename = os.path.join(feature_dir, f"{keyframe_count:06d}.odom")
+                        # 3. 应用 FOV 裁剪 (模拟 Sensor 视野)
+                        # accumulated_pcd = apply_fov_filter(accumulated_pcd)
+
+                        # 4. 降采样并保存
+                        feature_filename = os.path.join(on_route_dir, f"{keyframe_count:06d}.pcd")
+                        pose_filename = os.path.join(on_route_dir, f"{keyframe_count:06d}.odom")
                         
                         accumulated_pcd = accumulated_pcd.voxel_down_sample(voxel_size=0.1)
                         o3d.io.write_point_cloud(feature_filename, accumulated_pcd)
-                        np.savetxt(pose_filename, T_curr)
-                        print(f"[KeyFrame] Saved {keyframe_count:06d} (Points: {len(accumulated_pcd.points)})")
+                        
+                        # 保存也需要保存变换后的 Pose
+                        T_ext = T_BASE_TO_LIDAR
+                        T_ext_inv = np.linalg.inv(T_ext)
+                        T_body_in_map = T_ext @ T_curr @ T_ext_inv
+
+                        np.savetxt(pose_filename, T_body_in_map)
+                        print(f"\n[KeyFrame] Saved {keyframe_count:06d} (Points: {len(accumulated_pcd.points)})")
 
                     last_keyframe_pose = T_curr
                     keyframe_count += 1
 
     # ================= 处理结束后的工作 =================
+    print("\nProcessing finished.")
     
     if mode == 'map':
         print("\n--- Building Global Map with Dynamic Obstacle Removal ---")
