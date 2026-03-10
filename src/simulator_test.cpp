@@ -40,11 +40,11 @@ int main(int argc, char **argv) {
   fs::path root(PROJECT_ROOT_DIR);
   std::cout << "Project Root: " << PROJECT_ROOT_DIR << std::endl;
   fs::path dataset_dir = root / DATASET_DIR;
-  fs::path on_route_dir = dataset_dir / "keyframes" / "on_route";
+  fs::path processed_dir = dataset_dir / "keyframes" / "processed";
   fs::path compare_dir = dataset_dir / "keyframes" / "compare";
 
-  if (!fs::exists(on_route_dir)) {
-    std::cerr << "Directory not found: " << on_route_dir << std::endl;
+  if (!fs::exists(processed_dir)) {
+    std::cerr << "Directory not found: " << processed_dir << std::endl;
     return -1;
   }
 
@@ -57,14 +57,14 @@ int main(int argc, char **argv) {
   std::string config_path = (dataset_dir / "lidar_config.yaml").string();
   std::cout << "Loading Lidar Simulator with config: " << config_path << std::endl;
   simulator.load_config(config_path);
-  if (!simulator.load_map((dataset_dir / "global_map.pcd").string(), 0.2)) {
+  if (!simulator.load_map((dataset_dir / "global_map.pcd").string(), 0.5)) {
     return -1;
   }
 
-  // 2. 加载 on_route 关键帧
+  // 2. 加载 processed 关键帧
   std::vector<KeyFrame> kfs;
   std::vector<std::string> pcd_files;
-  for (const auto &entry : fs::directory_iterator(on_route_dir)) {
+  for (const auto &entry : fs::directory_iterator(processed_dir)) {
     if (entry.path().extension() == ".pcd") {
       pcd_files.push_back(entry.path().string());
     }
@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
   }
 
   if (kfs.empty()) {
-    std::cout << "No keyframes found in " << on_route_dir << std::endl;
+    std::cout << "No keyframes found in " << processed_dir << std::endl;
     return 0;
   }
 

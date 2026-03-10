@@ -34,10 +34,6 @@ ACCUMULATE_FRAMES = 5          # 关键帧累积帧数
 MAP_VOXEL_SIZE = 0.05          # 全局地图处理的体素大小 (米)
 STATIC_DURATION_THRESH = 1.5   # 静态物体判定阈值 (秒, 调低一点以适应较短的观测)
 
-LIVOX_FOV_MIN_RAD = np.radians(-7.0)
-LIVOX_FOV_MAX_RAD = np.radians(65.0)
-INSTALL_PITCH_DEG = 45.0       # 安装角度 (度)
-
 # --- 静态变换 (odom -> lidar_odom) ---
 # 用于对 body 系点云进行修正
 STATIC_TRANS = np.array([0.5496, 0.2400, 0.1934])
@@ -160,63 +156,6 @@ def accumulate_pcds(frame_list, target_pose):
         accumulated_feature_pcd += pcd_temp
         
     return accumulated_feature_pcd
-
-def apply_fov_filter(pcd, install_pitch_deg=INSTALL_PITCH_DEG):
-    """
-    根据安装角度和 FOV 范围裁剪点云。
-    pcd: 位于 Body Frame 的点云
-    """
-    points = np.asarray(pcd.points)
-    if len(points) == 0:
-        return pcd
-
-    # 1. 构建旋转矩阵 (Body -> Sensor)
-    # C++ 代码逻辑: Body_X = Sensor_X * cos(45) + Sensor_Z * sin(45)
-    # 这是一个绕 Y 轴旋转 +45 度的过程 (Sensor -> Body)。
-    # 因此，从 Body 到 Sensor 需要绕 Y 轴旋转 -45 度。
-    theta = np.radians(-install_pitch_deg)
-    c, s = np.cos(theta), np.sin(theta)
-    
-    # 绕 Y 轴旋转矩阵 (Ry)
-    # [ c  0  s]
-    # [ 0  1  0]
-    # [-s  0  c]
-    R_body_to_sensor = np.array([
-        [c, 0, s],
-        [0, 1, 0],
-        [-s, 0, c]
-    ])
-    
-    # 变换点云到 Sensor 坐标系
-    # points 是 (N, 3)，矩阵乘法需要转置或调整顺序: (R @ P.T).T = P @ R.T
-    points_sensor = points @ R_body_to_sensor.T
-    
-    # 2. 计算每个点在 Sensor 坐标系下的几何属性
-    # C++ 模拟器逻辑：点是在球面上生成的，z_sensor (dz) 对应 sin(elevation)
-    # 判断标准: sin(fov_min) <= z_sensor / norm <= sin(fov_max)
-    
-    norms = np.linalg.norm(points_sensor, axis=1)
-    
-    # 避免除以零
-    valid_indices = norms > 1e-6
-    
-    z_sensor = points_sensor[:, 2] # Z 分量
-    
-    # 计算 sin(elevation)
-    sin_elevation = np.zeros_like(z_sensor)
-    sin_elevation[valid_indices] = z_sensor[valid_indices] / norms[valid_indices]
-    
-    # 3. FOV 过滤
-    min_sin = np.sin(LIVOX_FOV_MIN_RAD)
-    max_sin = np.sin(LIVOX_FOV_MAX_RAD)
-    
-    # 保留范围内的点
-    mask = (sin_elevation >= min_sin) & (sin_elevation <= max_sin) & valid_indices
-    
-    filtered_pcd = pcd.select_by_index(np.where(mask)[0])
-    
-    # print(f"  [FOV Filter] Raw: {len(points)} -> Filtered: {len(filtered_pcd.points)}")
-    return filtered_pcd
 
 def filter_dynamic_obstacles(points_list, voxel_size, time_threshold):
     print(f"\n[Map Filter] 开始处理动态障碍物滤除...")

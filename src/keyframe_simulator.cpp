@@ -44,6 +44,8 @@ std::queue<ExtractTask> g_task_queue;
 std::mutex g_queue_mutex;
 std::condition_variable g_queue_cv;
 std::atomic<bool> g_running{true};
+std::atomic<int> g_total_tasks{0};
+std::atomic<int> g_finished_tasks{0};
 
 // 坐标转换工具
 void worldToScreen(double wx, double wy, int &sx, int &sy) {
@@ -183,14 +185,8 @@ void processTasks() {
       success = any_saved;
     }
 
-    {
-      std::lock_guard<std::mutex> lock(g_display_mutex);
-      if (success)
-        std::cout << "[Async] Task Finished: ID Range saved." << std::endl;
-      else
-        std::cout << "[Async] Task Failed: No ground or scan invalid."
-                  << std::endl;
-    }
+    g_finished_tasks++;
+    std::cout << "\r[Status] All " << g_total_tasks << ", Finished " << g_finished_tasks << std::flush;
   }
 }
 
@@ -253,11 +249,11 @@ void onMouse(int event, int x, int y, int flags, void *userdata) {
     {
       std::lock_guard<std::mutex> lock(g_queue_mutex);
       g_task_queue.push(task);
+      g_total_tasks++;
     }
     g_queue_cv.notify_one();
 
-    std::cout << "[Interactive] Task queued for (" << wx << ", " << wy << ")"
-              << std::endl;
+    std::cout << "\r[Status] All " << g_total_tasks << ", Finished " << g_finished_tasks << std::flush;
   }
 }
 

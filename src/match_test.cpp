@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
     (dataset_dir / "keyframes" / "simulated").string()
   };
   std::vector<std::string> query_dirs = {
-    (dataset_dir / "keyframes" / "on_route").string()
+    (dataset_dir / "keyframes" / "processed").string()
   };
 
   std::string map_path = (dataset_dir / "global_map.pcd").string();

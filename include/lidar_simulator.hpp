@@ -30,13 +30,14 @@
 enum class SimulationMethod {
   RAY_CASTING, // 基于 OctoMap 的光线投射
                // (模拟真实扫描线分布，精度高，速度受分辨率影响)
-  HIDDEN_POINT_REMOVAL // 基于 PCL HPR 的隐点剔除
+  HIDDEN_POINT_REMOVAL, // 基于 PCL HPR 的隐点剔除
                        // (直接提取可见点，保留原始点云密度，速度快)
+  Z_BUFFER // 基于 Z-Buffer (深度图) 的无遮挡模拟法
 };
 
 class LidarSimulator {
 public:
-  SimulationMethod method_ = SimulationMethod::RAY_CASTING;
+  SimulationMethod method_ = SimulationMethod::Z_BUFFER;
 
   double LIVOX_FOV_MIN_RAD = -12.0 * M_PI / 180.0;
   double LIVOX_FOV_MAX_RAD = 65.0 * M_PI / 180.0;
@@ -240,8 +241,10 @@ public:
       if (method_ == SimulationMethod::RAY_CASTING) {
         // Divide num_pts among lidars to maintain similar density
         scan = simulate_scan_raycast(pose, num_pts / T_body_lidars_.size());
-      } else {
+      } else if (method_ == SimulationMethod::HIDDEN_POINT_REMOVAL) {
         scan = simulate_scan_hpr(pose, 100);
+      } else {
+        scan = simulate_scan_zbuffer(pose, 100);
       }
       *combined_cloud += *scan;
     }
@@ -438,6 +441,118 @@ private:
           sin_ele <= sin(LIVOX_FOV_MAX_RAD)) {
         // 输出 Body Frame 下的点
         out_cloud->push_back(pcl::PointXYZ(p_b.x(), p_b.y(), p_b.z()));
+      }
+    }
+
+    return out_cloud;
+  }
+
+  // --- 策略 C: 基于 Z-Buffer (深度图) 的无遮挡模拟法 ---
+  pcl::PointCloud<pcl::PointXYZ>::Ptr
+  simulate_scan_zbuffer(const Pose &pose, double range = 10.0) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr out_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+
+    Eigen::Affine3d T_world_body = getTransformFromPose(pose);
+    Eigen::Affine3d T_world_sensor = T_world_body * T_body_lidar_;
+    Eigen::Affine3d T_sensor_world = T_world_sensor.inverse();
+    Eigen::Affine3d T_body_world = T_world_body.inverse();
+
+    // 1. 先用 CropBox 提取附近范围的点，减少计算量
+    Eigen::Vector3d sensor_pos = T_world_sensor.translation();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr local_area(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::CropBox<pcl::PointXYZ> box_filter;
+    box_filter.setMin(Eigen::Vector4f(sensor_pos.x() - range,
+                                      sensor_pos.y() - range,
+                                      sensor_pos.z() - range, 1.0));
+    box_filter.setMax(Eigen::Vector4f(sensor_pos.x() + range,
+                                      sensor_pos.y() + range,
+                                      sensor_pos.z() + range, 1.0));
+    box_filter.setInputCloud(global_map_);
+    box_filter.filter(*local_area);
+
+    // 2. 定义球面深度图的分辨率 (通过调节这两个参数控制点云密度和遮挡严格程度)
+    const int YAW_BINS = 100;  // 水平 360 度分为 1800 份 (0.2度分辨率)
+    const int PITCH_BINS = 100; // 垂直方向的分辨率
+
+    // 初始化 Z-buffer
+    std::vector<double> depth_buffer(
+        YAW_BINS * PITCH_BINS, std::numeric_limits<double>::max());
+    std::vector<pcl::PointXYZ> point_buffer(YAW_BINS * PITCH_BINS);
+    std::vector<bool> valid_buffer(YAW_BINS * PITCH_BINS, false);
+
+    double fov_min = LIVOX_FOV_MIN_RAD;
+    double fov_max = LIVOX_FOV_MAX_RAD;
+    double fov_range = fov_max - fov_min;
+
+    // 3. 投影到深度图
+    int num_points = local_area->size();
+#pragma omp parallel
+    {
+      std::vector<double> local_depth_buffer(
+          YAW_BINS * PITCH_BINS, std::numeric_limits<double>::max());
+      std::vector<pcl::PointXYZ> local_point_buffer(YAW_BINS * PITCH_BINS);
+      std::vector<bool> local_valid_buffer(YAW_BINS * PITCH_BINS, false);
+
+#pragma omp for nowait
+      for (int i = 0; i < num_points; ++i) {
+        const auto &pt_w = local_area->points[i];
+        Eigen::Vector3d p_world(pt_w.x, pt_w.y, pt_w.z);
+
+        // 转换到 Sensor 坐标系下计算俯仰角和水平角
+        Eigen::Vector3d p_sensor = T_sensor_world * p_world;
+        double dist = p_sensor.norm();
+
+        if (dist < 0.5 || dist > range)
+          continue;
+
+        // 计算 Yaw [-pi, pi] 和 Pitch [-pi/2, pi/2]
+        double yaw = std::atan2(p_sensor.y(), p_sensor.x());
+        double pitch = std::asin(p_sensor.z() / dist);
+
+        // 检查是否在垂直 FOV 范围内
+        if (pitch < fov_min || pitch > fov_max)
+          continue;
+
+        // 映射到网格索引
+        int u = (yaw + M_PI) / (2.0 * M_PI) * YAW_BINS;
+        int v = (pitch - fov_min) / fov_range * PITCH_BINS;
+
+        // 限制边界防止越界
+        u = std::clamp(u, 0, YAW_BINS - 1);
+        v = std::clamp(v, 0, PITCH_BINS - 1);
+
+        int idx = v * YAW_BINS + u;
+
+        // Z-Buffer 核心逻辑：只保留最近的点 (或者给点容差，这里直接用最短距离)
+        if (dist < local_depth_buffer[idx]) {
+          local_depth_buffer[idx] = dist;
+
+          // 保存 Body 系下的坐标 (根据你的需求，需要输出 Body 系)
+          Eigen::Vector3d p_body = T_body_world * p_world;
+          local_point_buffer[idx] =
+              pcl::PointXYZ(p_body.x(), p_body.y(), p_body.z());
+          local_valid_buffer[idx] = true;
+        }
+      }
+
+#pragma omp critical
+      {
+        for (int i = 0; i < YAW_BINS * PITCH_BINS; ++i) {
+          if (local_valid_buffer[i] && local_depth_buffer[i] < depth_buffer[i]) {
+            depth_buffer[i] = local_depth_buffer[i];
+            point_buffer[i] = local_point_buffer[i];
+            valid_buffer[i] = true;
+          }
+        }
+      }
+    }
+
+    // 4. 从深度图中提取不被遮挡的点
+    for (size_t i = 0; i < valid_buffer.size(); ++i) {
+      if (valid_buffer[i]) {
+        out_cloud->push_back(point_buffer[i]);
       }
     }
 
