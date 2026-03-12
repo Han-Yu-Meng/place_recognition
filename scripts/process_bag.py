@@ -28,6 +28,10 @@ KEYFRAME_ANGLE_DEG = 10.0      # 关键帧角度阈值 (度)
 STATIC_TRANS = np.array([0.5496, 0.2400, 0.1934])
 STATIC_QUAT = np.array([0.0, 0.130526, 0.0, 0.991445]) # x, y, z, w
 
+# --- 过滤框配置 (基于 CAD 文件，包含 5cm 裕量) ---
+FILTER_BOX_MIN = np.array([-0.25, -0.35, 0.05])
+FILTER_BOX_MAX = np.array([0.55, 0.35, 0.87])
+
 def get_static_tf():
     rot = R.from_quat(STATIC_QUAT).as_matrix()
     T = np.eye(4)
@@ -167,8 +171,16 @@ def main():
                 if pcd is None:
                     continue
                 
+                # 1. 坐标系转换 (Lidar -> Body)
                 pcd.transform(T_BASE_TO_LIDAR)
                 
+                # 2. 滤除处于静态 Box 中的点 (移除机器人自身遮挡)
+                points = np.asarray(pcd.points)
+                mask = ~((points[:, 0] >= FILTER_BOX_MIN[0]) & (points[:, 0] <= FILTER_BOX_MAX[0]) &
+                         (points[:, 1] >= FILTER_BOX_MIN[1]) & (points[:, 1] <= FILTER_BOX_MAX[1]) &
+                         (points[:, 2] >= FILTER_BOX_MIN[2]) & (points[:, 2] <= FILTER_BOX_MAX[2]))
+                pcd.points = o3d.utility.Vector3dVector(points[mask])
+
                 T_ext = T_BASE_TO_LIDAR
                 T_ext_inv = np.linalg.inv(T_ext)
                 T_final_pose = T_ext @ T_curr @ T_ext_inv

@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
   std::string config_path = (dataset_dir / "lidar_config.yaml").string();
   std::cout << "Loading Lidar Simulator with config: " << config_path << std::endl;
   simulator.load_config(config_path);
-  if (!simulator.load_map((dataset_dir / "global_map.pcd").string(), 0.5)) {
+  if (!simulator.load_map((dataset_dir / "global_map.pcd").string(), 0.2)) {
     return -1;
   }
 

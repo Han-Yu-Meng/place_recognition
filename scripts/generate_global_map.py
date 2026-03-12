@@ -15,9 +15,9 @@ INPUT_DIR = os.path.join(DATASET_ROOT, 'keyframes', 'processed')
 OUTPUT_MAP_PATH = os.path.join(DATASET_ROOT, 'global_map.pcd')
 
 # --- 地图生成配置 ---
-MAP_VOXEL_SIZE = 0.05          # 全局地图体素降采样大小 (米)
+MAP_VOXEL_SIZE = 0.2          # 全局地图体素降采样大小 (米)
 STATIC_DURATION_THRESH = 1.0   # 判定为静态所需的最小观测时长 (秒)
-ENABLE_DYNAMIC_FILTER = False    # 动态物体滤除开关 (True: 开启, False: 直接合并)
+ENABLE_DYNAMIC_FILTER = True    # 动态物体滤除开关 (True: 开启, False: 直接合并)
 
 def filter_dynamic_obstacles(points_list, filter_voxel_size, time_threshold):
     """
@@ -120,11 +120,11 @@ def main():
         global_map_pcd.points = o3d.utility.Vector3dVector(all_points)
 
     print("\nFinalizing and saving global map...")
-    # final_pcd = global_map_pcd.voxel_down_sample(voxel_size=MAP_VOXEL_SIZE)
-    o3d.io.write_point_cloud(OUTPUT_MAP_PATH, global_map_pcd)
+    final_pcd = global_map_pcd.voxel_down_sample(voxel_size=MAP_VOXEL_SIZE)
+    o3d.io.write_point_cloud(OUTPUT_MAP_PATH, final_pcd)
     
     print(f"Global map saved to: {OUTPUT_MAP_PATH}")
-    print(f"Total points: {len(global_map_pcd.points)}")
+    print(f"Total points: {len(final_pcd.points)}")
 
     try:
         subprocess.Popen(['pcl_viewer', OUTPUT_MAP_PATH])

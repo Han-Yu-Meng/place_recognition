@@ -296,7 +296,7 @@ int main(int argc, char **argv) {
 
   LidarSimulator simulator;
   simulator.load_config((dataset_dir / "lidar_config.yaml").string());
-  if (!simulator.load_map(map_path, 0.05)) {
+  if (!simulator.load_map(map_path, 0.10)) {
     return -1;
   }
   g_simulator = &simulator;

@@ -18,6 +18,9 @@
 #include <pcl/common/transforms.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/extract_indices.h>
+#include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -37,10 +40,10 @@ enum class SimulationMethod {
 
 class LidarSimulator {
 public:
-  SimulationMethod method_ = SimulationMethod::Z_BUFFER;
+  SimulationMethod method_ = SimulationMethod::RAY_CASTING;
 
-  double LIVOX_FOV_MIN_RAD = -12.0 * M_PI / 180.0;
-  double LIVOX_FOV_MAX_RAD = 65.0 * M_PI / 180.0;
+  double LIVOX_FOV_MIN_RAD = -7.0 * M_PI / 180.0;
+  double LIVOX_FOV_MAX_RAD = 52.0 * M_PI / 180.0;
 
   const double GOLDEN_ANGLE = M_PI * (3.0 - sqrt(5.0));
 
@@ -242,6 +245,21 @@ public:
         scan = simulate_scan_zbuffer(pose, 100);
       }
       *combined_cloud += *scan;
+    }
+
+    // 优化：使用 VoxelGrid 进行下采样并过滤（比 SOR 快得多）
+    if (!combined_cloud->empty()) {
+      // pcl::VoxelGrid<pcl::PointXYZ> vg;
+      // vg.setInputCloud(combined_cloud);
+      // vg.setLeafSize(0.1f, 0.1f, 0.1f); // 根据场景调整分辨率
+      // vg.filter(*combined_cloud);
+      
+      // 或者使用 RadiusOutlierRemoval，它通常比 StatisticalOutlierRemoval 更快
+      pcl::RadiusOutlierRemoval<pcl::PointXYZ> ror;
+      ror.setInputCloud(combined_cloud);
+      ror.setRadiusSearch(0.5);
+      ror.setMinNeighborsInRadius(3);
+      ror.filter(*combined_cloud);
     }
 
     return combined_cloud;
