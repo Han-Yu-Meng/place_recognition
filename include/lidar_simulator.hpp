@@ -42,9 +42,6 @@ public:
   double LIVOX_FOV_MIN_RAD = -12.0 * M_PI / 180.0;
   double LIVOX_FOV_MAX_RAD = 65.0 * M_PI / 180.0;
 
-  // 如果雷达是斜着装的，这里定义倾角
-  const double LIDAR_PITCH_OFFSET_RAD = 45 * M_PI / 180.0;
-
   const double GOLDEN_ANGLE = M_PI * (3.0 - sqrt(5.0));
 
   // Data
@@ -64,9 +61,7 @@ public:
   };
 
   LidarSimulator() : global_map_(new pcl::PointCloud<pcl::PointXYZ>) {
-    T_body_lidar_.linear() =
-        Eigen::AngleAxisd(45.0 * M_PI / 180.0, Eigen::Vector3d::UnitY())
-            .toRotationMatrix();
+
   }
 
   bool load_config(const std::string &config_path) {
@@ -473,8 +468,8 @@ private:
     box_filter.filter(*local_area);
 
     // 2. 定义球面深度图的分辨率 (通过调节这两个参数控制点云密度和遮挡严格程度)
-    const int YAW_BINS = 100;  // 水平 360 度分为 1800 份 (0.2度分辨率)
-    const int PITCH_BINS = 100; // 垂直方向的分辨率
+    const int YAW_BINS = 300;  // 水平 360 度分为 1800 份 (0.2度分辨率)
+    const int PITCH_BINS = 300; // 垂直方向的分辨率
 
     // 初始化 Z-buffer
     std::vector<double> depth_buffer(
@@ -549,9 +544,43 @@ private:
       }
     }
 
-    // 4. 从深度图中提取不被遮挡的点
+    // 4. 执行深度膨胀，增强遮挡效果
+    // DILATION_RADIUS 根据地图点间距和最大距离估算
+    double map_resolution = 0.1; // 默认值，如果 load_map 时传入了不同值需保持同步
+    if (octomap_) map_resolution = octomap_->getResolution();
+    
+    double angular_res_yaw = 2.0 * M_PI / YAW_BINS;
+    double angular_res_pitch = fov_range / PITCH_BINS;
+    double angular_res = std::min(angular_res_yaw, angular_res_pitch);
+
+    const int DILATION_RADIUS = std::max(2, (int)(5.0 * map_resolution / (range * angular_res)));
+
+    std::vector<double> dilated_depth(YAW_BINS * PITCH_BINS,
+                                       std::numeric_limits<double>::max());
+
+    for (int v = 0; v < PITCH_BINS; ++v) {
+      for (int u = 0; u < YAW_BINS; ++u) {
+        int idx = v * YAW_BINS + u;
+        if (!valid_buffer[idx])
+          continue;
+
+        double d = depth_buffer[idx];
+        // 向周围扩散遮挡深度（允许一点深度余量）
+        for (int dv = -DILATION_RADIUS; dv <= DILATION_RADIUS; ++dv) {
+          for (int du = -DILATION_RADIUS; du <= DILATION_RADIUS; ++du) {
+            int nu = (u + du + YAW_BINS) % YAW_BINS; // yaw 方向循环
+            int nv = std::clamp(v + dv, 0, PITCH_BINS - 1);
+            int nidx = nv * YAW_BINS + nu;
+            // 用略大的深度值去阻挡周围 bin 的背景点
+            dilated_depth[nidx] = std::min(dilated_depth[nidx], d * 1.05);
+          }
+        }
+      }
+    }
+
+    // 5. 从深度图中提取不被遮挡的点
     for (size_t i = 0; i < valid_buffer.size(); ++i) {
-      if (valid_buffer[i]) {
+      if (valid_buffer[i] && depth_buffer[i] <= dilated_depth[i]) {
         out_cloud->push_back(point_buffer[i]);
       }
     }
