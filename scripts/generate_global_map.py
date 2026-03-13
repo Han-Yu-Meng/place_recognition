@@ -13,6 +13,7 @@ DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
 INPUT_DIR = os.path.join(DATASET_ROOT, 'keyframes', 'processed')
 # 输出文件：全局地图
 OUTPUT_MAP_PATH = os.path.join(DATASET_ROOT, 'global_map.pcd')
+OUTPUT_MAP_DENSE_PATH = os.path.join(DATASET_ROOT, 'global_map_dense.pcd')
 
 # --- 地图生成配置 ---
 MAP_VOXEL_SIZE = 0.2          # 全局地图体素降采样大小 (米)
@@ -120,11 +121,14 @@ def main():
         global_map_pcd.points = o3d.utility.Vector3dVector(all_points)
 
     print("\nFinalizing and saving global map...")
+    o3d.io.write_point_cloud(OUTPUT_MAP_DENSE_PATH, global_map_pcd)
+    print(f"Dense global map saved to: {OUTPUT_MAP_DENSE_PATH}")
+
     final_pcd = global_map_pcd.voxel_down_sample(voxel_size=MAP_VOXEL_SIZE)
     o3d.io.write_point_cloud(OUTPUT_MAP_PATH, final_pcd)
     
     print(f"Global map saved to: {OUTPUT_MAP_PATH}")
-    print(f"Total points: {len(final_pcd.points)}")
+    print(f"Total points (downsampled): {len(final_pcd.points)}")
 
     try:
         subprocess.Popen(['pcl_viewer', OUTPUT_MAP_PATH])
