@@ -5,8 +5,8 @@ from PIL import Image
 import yaml
 import cv2  # 用于图像形态学处理，连结断开的墙壁
 
-# ================= 配置参数 =================
-DATASET_NAME = 'YunJing'
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DATASET'), 'r') as f:
+    DATASET_NAME = f.read().strip()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
 

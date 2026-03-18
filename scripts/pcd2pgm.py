@@ -4,8 +4,8 @@ import open3d as o3d
 from PIL import Image
 import yaml
 
-# ================= 配置参数 =================
-DATASET_NAME = 'YunJing'
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DATASET'), 'r') as f:
+    DATASET_NAME = f.read().strip()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
 

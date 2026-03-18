@@ -12,7 +12,7 @@
 
 namespace fs = std::filesystem;
 
-const std::string DATASET_DIR = "YunJing";
+const std::string DATASET_DIR = "BaoLi";
 
 struct KeyFrame {
   int id;

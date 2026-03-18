@@ -1,5 +1,6 @@
 import os
 import yaml
+import json
 import numpy as np
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R, Slerp
@@ -15,23 +16,20 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
 
 BAG_PATH = os.path.join(DATASET_ROOT, 'bag')
-OUTPUT_DIR = os.path.join(DATASET_ROOT, 'keyframes', 'raw')
+HBA_DIR = os.path.join(DATASET_ROOT, 'hba')
+HBA_PCD_DIR = os.path.join(HBA_DIR, 'pcd')
+HBA_POSE_FILE = os.path.join(HBA_DIR, 'pose.json')
 CONFIG_PATH = os.path.join(DATASET_ROOT, 'lidar_config.yaml')
 
-TOPIC_CLOUD = '/cloud_registered'
+TOPIC_CLOUD = '/cloud_registered_body'
 TOPIC_ODOM = '/Odometry'
 
-def is_raw_lidar_topic(topic):
-    return topic == '/cloud_registered'
-
 # --- 关键帧配置 ---
-# 这里的参数可以根据需要调整，或者从命令行参数获取
 KEYFRAME_DIST = 0.2            # 关键帧距离阈值 (米)
 KEYFRAME_ANGLE_DEG = 10.0      # 关键帧角度阈值 (度)
 
 def load_lidar_config(path):
     with open(path, 'r') as f:
-        # Skip the %YAML:1.0 line if it exists
         content = f.read()
         if content.startswith('%YAML'):
             content = '\n'.join(content.split('\n')[1:])
@@ -43,7 +41,6 @@ def load_lidar_config(path):
     
     cfg = T_baselink_lidar_list[0]
     trans = np.array([cfg['x'], cfg['y'], cfg['z']])
-    # roll, pitch, yaw are in degrees
     rot = R.from_euler('xyz', [cfg['roll'], cfg['pitch'], cfg['yaw']], degrees=True)
     quat = rot.as_quat() # x, y, z, w
 
@@ -88,12 +85,9 @@ class OdomBuffer:
             if t0 <= time_s <= t1:
                 ratio = (time_s - t0) / (t1 - t0)
                 trans = (1 - ratio) * T0[:3, 3] + ratio * T1[:3, 3]
-                
-                # SLERP 旋转插值
                 rots = R.from_matrix([T0[:3, :3], T1[:3, :3]])
                 slerp = Slerp([t0, t1], rots)
                 interp_rot = slerp([time_s]).as_matrix()[0]
-                
                 T = np.eye(4)
                 T[:3, :3] = interp_rot
                 T[:3, 3] = trans
@@ -110,10 +104,8 @@ def get_rosbag_options(path, serialization_format='cdr'):
 def odom_to_matrix(odom_msg):
     p = odom_msg.pose.pose.position
     q = odom_msg.pose.pose.orientation
-    
     trans = np.array([p.x, p.y, p.z])
     rot = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-    
     T = np.eye(4)
     T[:3, :3] = rot
     T[:3, 3] = trans
@@ -123,7 +115,6 @@ def msg_to_pcd(cloud_msg):
     gen = pc2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
     points = list(gen)
     if not points: return None
-    
     xyz = np.array([(p[0], p[1], p[2]) for p in points])
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz)
@@ -138,9 +129,9 @@ def calculate_delta(T1, T2):
     return dist, angle_deg
 
 def main():
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-        print(f"Created output directory: {OUTPUT_DIR}")
+    if not os.path.exists(HBA_PCD_DIR):
+        os.makedirs(HBA_PCD_DIR)
+        print(f"Created HBA PCD directory: {HBA_PCD_DIR}")
 
     storage_options, converter_options = get_rosbag_options(BAG_PATH)
     reader = rosbag2_py.SequentialReader()
@@ -158,9 +149,9 @@ def main():
     odom_buffer = OdomBuffer()
     last_keyframe_pose = None
     keyframe_count = 0
+    hba_poses = []
     
-    print(f"Starting to process bag from: {BAG_PATH}")
-    print(f"Output will be saved to: {OUTPUT_DIR}")
+    print(f"Starting to process bag for HBA: {BAG_PATH}")
 
     while reader.has_next():
         (topic, data, t_ns) = reader.read_next()
@@ -175,12 +166,10 @@ def main():
             msg_type = get_message(type_map[topic])
             cloud_msg = deserialize_message(data, msg_type)
             
-            # 获取插值位姿
             T_curr = odom_buffer.get_interpolated_pose(current_time_s)
             if T_curr is None:
                 continue
 
-            # 关键帧判断逻辑
             is_keyframe = False
             if last_keyframe_pose is None:
                 is_keyframe = True
@@ -194,36 +183,45 @@ def main():
                 if pcd is None:
                     continue
                 
-                if is_raw_lidar_topic(TOPIC_CLOUD):
-                    T_curr_inv = np.linalg.inv(T_curr)
-                    pcd.transform(T_curr_inv)
-                    
+                # 1. 坐标系转换 (Lidar -> Body)
                 pcd.transform(T_BASE_TO_LIDAR)
                 
-                # 2. 滤除处于静态 Box 中的点 (移除机器人自身遮挡)
+                # 2. 滤除机器人自身遮挡
                 points = np.asarray(pcd.points)
                 mask = ~((points[:, 0] >= FILTER_BOX_MIN[0]) & (points[:, 0] <= FILTER_BOX_MAX[0]) &
                          (points[:, 1] >= FILTER_BOX_MIN[1]) & (points[:, 1] <= FILTER_BOX_MAX[1]) &
                          (points[:, 2] >= FILTER_BOX_MIN[2]) & (points[:, 2] <= FILTER_BOX_MAX[2]))
                 pcd.points = o3d.utility.Vector3dVector(points[mask])
 
+                # 计算 Body 坐标系下的位姿
                 T_ext = T_BASE_TO_LIDAR
                 T_ext_inv = np.linalg.inv(T_ext)
                 T_final_pose = T_ext @ T_curr @ T_ext_inv
+                
+                # 转换位姿格式: tx ty tz qw qx qy qz
+                pos = T_final_pose[:3, 3]
+                quat = R.from_matrix(T_final_pose[:3, :3]).as_quat() # [x, y, z, w]
+                hba_pose_str = f"{pos[0]} {pos[1]} {pos[2]} {quat[3]} {quat[0]} {quat[1]} {quat[2]}"
+                hba_poses.append(hba_pose_str)
 
-                pcd_filename = os.path.join(OUTPUT_DIR, f"{keyframe_count:06d}.pcd")
-                odom_filename = os.path.join(OUTPUT_DIR, f"{keyframe_count:06d}.odom")
-                
-                # 写文件
+                # 保存 PCD (使用 5 位数补全，例如 00000.pcd)
+                pcd_filename = os.path.join(HBA_PCD_DIR, f"{keyframe_count:05d}.pcd")
                 o3d.io.write_point_cloud(pcd_filename, pcd)
-                np.savetxt(odom_filename, T_final_pose)
                 
-                print(f"\r[KeyFrame] Saved {keyframe_count:06d} at {current_time_s:.2f}s", end='', flush=True)
+                print(f"\r[HBA] Saved {keyframe_count:05d} at {current_time_s:.2f}s", end='', flush=True)
                 
                 last_keyframe_pose = T_curr
                 keyframe_count += 1
 
+    # 保存 pose.json
+    with open(HBA_POSE_FILE, 'w') as f:
+        # HBA 期望的是每行一个位姿的格式。虽然叫 .json 但根据描述内容是文本列表
+        # 这里为了符合 "pose.json file containing the initial poses" 的描述，
+        # 我们按照用户提供的示例格式直接保存为文本行。
+        f.write("\n".join(hba_poses))
+
     print(f"\nFinished. Total keyframes: {keyframe_count}")
+    print(f"HBA data saved to: {HBA_DIR}")
 
 if __name__ == "__main__":
     main()

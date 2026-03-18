@@ -5,9 +5,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
 
-# ================= 配置参数 =================
-DATASET_NAME = 'YunJing'
-# 自动定位到项目根目录
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DATASET'), 'r') as f:
+    DATASET_NAME = f.read().strip()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
 
