@@ -15,30 +15,18 @@
 #include <queue>
 #include <thread>
 
-const std::string DATASET_DIR = "YunJing";
+const std::string DATASET_DIR = "BaoLi";
 
 namespace fs = std::filesystem;
 
 struct ExtractTask {
   double world_x, world_y;
-  int display_x, display_y;
 };
 
 LidarSimulator *g_simulator;
 std::string g_output_dir;
 int g_id_counter = 100000;
-double g_min_x, g_max_x, g_min_y, g_max_y;
-int g_img_w = 1000, g_img_h = 1000;
-float g_scale;
-float g_base_scale;         // 每一级别的基准缩放
-float g_zoom_factor = 1.0f; // 当前缩放因子
-double g_offset_x = 0.0;    // 视图偏移 X
-double g_offset_y = 0.0;    // 视图偏移 Y
 double g_robot_height = 0.325;
-cv::Mat g_base_map;    // 原始全图 (用于缩放)
-cv::Mat g_display_map; // 当前显示的图
-std::mutex g_display_mutex;
-std::vector<cv::Point2d> g_trajectory;
 
 std::queue<ExtractTask> g_task_queue;
 std::mutex g_queue_mutex;
@@ -46,74 +34,6 @@ std::condition_variable g_queue_cv;
 std::atomic<bool> g_running{true};
 std::atomic<int> g_total_tasks{0};
 std::atomic<int> g_finished_tasks{0};
-
-// 坐标转换工具
-void worldToScreen(double wx, double wy, int &sx, int &sy) {
-  sx = (int)((wx - g_min_x) * g_scale * g_zoom_factor + g_offset_x);
-  sy = g_img_h - (int)((wy - g_min_y) * g_scale * g_zoom_factor + g_offset_y);
-}
-
-void screenToWorld(int sx, int sy, double &wx, double &wy) {
-  wx = g_min_x + (sx - g_offset_x) / (g_scale * g_zoom_factor);
-  wy = g_min_y + (g_img_h - sy - g_offset_y) / (g_scale * g_zoom_factor);
-}
-
-// 刷新显示
-void updateDisplay() {
-  std::lock_guard<std::mutex> lock(g_display_mutex);
-
-  cv::Mat view = cv::Mat::zeros(g_img_h, g_img_w, CV_8UC3);
-
-  if (g_simulator && g_simulator->global_map_) {
-    double visible_min_x, visible_max_x, visible_min_y, visible_max_y;
-    screenToWorld(0, g_img_h, visible_min_x, visible_min_y);
-    screenToWorld(g_img_w, 0, visible_max_x, visible_max_y);
-
-    visible_min_x -= 5.0;
-    visible_max_x += 5.0;
-    visible_min_y -= 5.0;
-    visible_max_y += 5.0;
-
-    static double min_z_m = -100, max_z_m = 100;
-    static bool range_set = false;
-    if (!range_set) {
-      double dummy1; // Use double to match function signature
-      g_simulator->get_map_bounds(dummy1, dummy1, dummy1, dummy1, min_z_m,
-                                  max_z_m);
-      range_set = true;
-    }
-
-    // 绘制效率优化：直接操作像素指针
-    for (const auto &pt : g_simulator->global_map_->points) {
-      if (pt.x < visible_min_x || pt.x > visible_max_x ||
-          pt.y < visible_min_y || pt.y > visible_max_y)
-        continue;
-
-      int sx, sy;
-      worldToScreen(pt.x, pt.y, sx, sy);
-
-      if (sx >= 0 && sx < g_img_w && sy >= 0 && sy < g_img_h) {
-        uchar brightness = (uchar)std::clamp(
-            (pt.z - min_z_m) / (max_z_m - min_z_m) * 200 + 55, 55.0, 255.0);
-        view.at<cv::Vec3b>(sy, sx) =
-            cv::Vec3b(brightness / 2, brightness, brightness / 2);
-      }
-    }
-  }
-
-  // Draw Trajectory
-  if (g_trajectory.size() >= 2) {
-    for (size_t i = 1; i < g_trajectory.size(); ++i) {
-        int sx1, sy1, sx2, sy2;
-        worldToScreen(g_trajectory[i-1].x, g_trajectory[i-1].y, sx1, sy1);
-        worldToScreen(g_trajectory[i].x, g_trajectory[i].y, sx2, sy2);
-        
-        cv::line(view, cv::Point(sx1, sy1), cv::Point(sx2, sy2), cv::Scalar(0, 0, 255), 2);
-    }
-  }
-
-  g_display_map = view;
-}
 
 // 消费者线程：处理计算任务
 void processTasks() {
@@ -186,113 +106,49 @@ void processTasks() {
     }
 
     g_finished_tasks++;
-    std::cout << "\r[Status] All " << g_total_tasks << ", Finished " << g_finished_tasks << std::flush;
-  }
-}
-
-// 鼠标点击回调函数
-void onMouse(int event, int x, int y, int flags, void *userdata) {
-  // 滚轮缩放
-  if (event == cv::EVENT_MOUSEWHEEL) {
-    float old_zoom = g_zoom_factor;
-    if (cv::getMouseWheelDelta(flags) > 0) {
-      g_zoom_factor *= 1.1f;
-    } else {
-      g_zoom_factor /= 1.1f;
-    }
-    if (g_zoom_factor < 0.1f)
-      g_zoom_factor = 0.1f;
-    if (g_zoom_factor > 20.0f)
-      g_zoom_factor = 20.0f;
-
-    double wx, wy;
-    screenToWorld(x, y, wx, wy);
-
-    g_offset_x = x - (wx - g_min_x) * g_scale * g_zoom_factor;
-    g_offset_y = (g_img_h - y) - (wy - g_min_y) * g_scale * g_zoom_factor;
-
-    updateDisplay();
-    cv::imshow("Grid Feature Extractor - Interactive", g_display_map);
-    return;
-  }
-
-  static int prev_x = -1, prev_y = -1;
-  if (event == cv::EVENT_MBUTTONDOWN || event == cv::EVENT_RBUTTONDOWN) {
-    prev_x = x;
-    prev_y = y;
-  } else if (event == cv::EVENT_MOUSEMOVE &&
-             (flags & (cv::EVENT_FLAG_MBUTTON | cv::EVENT_FLAG_RBUTTON))) {
-    g_offset_x += (x - prev_x);
-    g_offset_y -= (y - prev_y); // y-axis inverted
-    prev_x = x;
-    prev_y = y;
-    updateDisplay();
-    cv::imshow("Grid Feature Extractor - Interactive", g_display_map);
-  }
-
-  // 左键点击添加任务
-  if (event == cv::EVENT_LBUTTONDOWN) {
-    double wx, wy;
-    screenToWorld(x, y, wx, wy);
-
-    // 立即在当前画面画个黄圈表示 "Processing"
-    cv::circle(g_display_map, cv::Point(x, y), 5, cv::Scalar(0, 255, 255), 2);
-    cv::imshow("Grid Feature Extractor - Interactive", g_display_map);
-
-    // 加入队列
-    ExtractTask task;
-    task.world_x = wx;
-    task.world_y = wy;
-    task.display_x = x;
-    task.display_y = y;
-
-    {
-      std::lock_guard<std::mutex> lock(g_queue_mutex);
-      g_task_queue.push(task);
-      g_total_tasks++;
-    }
-    g_queue_cv.notify_one();
-
-    std::cout << "\r[Status] All " << g_total_tasks << ", Finished " << g_finished_tasks << std::flush;
-  }
-}
-
-void loadTrajectory() {
-  fs::path root(PROJECT_ROOT_DIR);
-
-  std::string feat_dir = (root / DATASET_DIR / "features").string();
-  if (!fs::exists(feat_dir)) return;
-
-  std::vector<std::string> odom_files;
-  for (const auto &entry : fs::directory_iterator(feat_dir)) {
-    if (entry.path().extension() == ".odom") {
-      odom_files.push_back(entry.path().string());
-    }
-  }
-  std::sort(odom_files.begin(), odom_files.end());
-
-  for (const auto &path : odom_files) {
-    std::ifstream file(path);
-    Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c)
-            file >> pose(r, c);
     
-    g_trajectory.push_back(cv::Point2d(pose(0, 3), pose(1, 3)));
+    // 进度条渲染
+    {
+      static std::mutex console_mutex;
+      std::lock_guard<std::mutex> lock(console_mutex);
+      const int bar_width = 50;
+      float progress = (float)g_finished_tasks / g_total_tasks;
+      int pos = bar_width * progress;
+
+      std::cout << "\r[";
+      for (int i = 0; i < bar_width; ++i) {
+        if (i < pos) std::cout << "=";
+        else if (i == pos) std::cout << ">";
+        else std::cout << " ";
+      }
+      std::cout << "] " << int(progress * 100.0) << "% (" 
+                << g_finished_tasks << "/" << g_total_tasks << ")" << std::flush;
+    }
   }
-  std::cout << "[Grid] Loaded trajectory with " << g_trajectory.size() << " points." << std::endl;
 }
 
 int main(int argc, char **argv) {
   fs::path root(PROJECT_ROOT_DIR);
-  fs::path dataset_dir = root / DATASET_DIR;
-
-  std::string map_path = (dataset_dir / "global_map.pcd").string();
-  g_output_dir = (dataset_dir / "keyframes" / "simulated").string() + "/";
-
-  if (!fs::exists(g_output_dir)) {
-    fs::create_directories(g_output_dir);
+  
+  // 从 scripts/DATASET 读取数据集名字
+  std::string dataset_name = "BaoLi";
+  std::ifstream dataset_file(root / "scripts" / "DATASET");
+  if (dataset_file.is_open()) {
+    dataset_file >> dataset_name;
+    dataset_file.close();
   }
+  
+  fs::path dataset_dir = root / dataset_name;
+  std::string map_path = (dataset_dir / "global_map.pcd").string();
+  fs::path output_path = dataset_dir / "keyframes" / "simulated";
+  g_output_dir = output_path.string() + "/";
+
+  // 每次运行前删除并重新创建 simulated 文件夹
+  if (fs::exists(output_path)) {
+    fs::remove_all(output_path);
+    std::cout << "[Grid] Cleaned folder: " << output_path << std::endl;
+  }
+  fs::create_directories(output_path);
 
   LidarSimulator simulator;
   simulator.load_config((dataset_dir / "lidar_config.yaml").string());
@@ -301,50 +157,53 @@ int main(int argc, char **argv) {
   }
   g_simulator = &simulator;
 
-  loadTrajectory();
+  // 读取 tasks.json 放入队列
+  fs::path tasks_path = dataset_dir / "tasks.json";
+  if (!fs::exists(tasks_path)) {
+    std::cerr << "[Error] tasks.json not found: " << tasks_path << std::endl;
+    return -1;
+  }
 
-  double min_z_m, max_z_m;
-  simulator.get_map_bounds(g_min_x, g_max_x, g_min_y, g_max_y, min_z_m,
-                           max_z_m);
+  std::ifstream f(tasks_path);
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.find("\"world_x\"") != std::string::npos) {
+      double wx = std::stod(line.substr(line.find(":") + 1));
+      std::getline(f, line);
+      double wy = std::stod(line.substr(line.find(":") + 1));
+      ExtractTask task;
+      task.world_x = wx;
+      task.world_y = wy;
+      {
+        std::lock_guard<std::mutex> lock(g_queue_mutex);
+        g_task_queue.push(task);
+        g_total_tasks++;
+      }
+    }
+  }
 
-  float scale_x = (g_img_w - 100.0f) / (g_max_x - g_min_x);
-  float scale_y = (g_img_h - 100.0f) / (g_max_y - g_min_y);
-  g_scale = std::min(scale_x, scale_y);
+  std::cout << "[Grid] Loaded " << g_total_tasks << " tasks from tasks.json" << std::endl;
 
-  g_offset_x = (g_img_w - (g_max_x - g_min_x) * g_scale) / 2.0;
-  g_offset_y = (g_img_h - (g_max_y - g_min_y) * g_scale) / 2.0;
+  std::vector<std::thread> workers;
+  // 限制线程数为 1，以解决 LidarSimulator 内部状态（T_body_lidar_）非线程安全导致的 Bus Error
+  int num_threads = 1; 
+  std::cout << "[Grid] Using " << num_threads << " thread to avoid race conditions." << std::endl;
+  for (int i = 0; i < num_threads; ++i) {
+    workers.emplace_back(processTasks);
+  }
 
-  g_display_map = cv::Mat::zeros(g_img_h, g_img_w, CV_8UC3);
-
-  std::thread worker(processTasks);
-
-  std::cout << "\n==============================================" << std::endl;
-  std::cout << "  INTERACTIVE GRID FEATURE EXTRACTOR v2.0" << std::endl;
-  std::cout << "----------------------------------------------" << std::endl;
-  std::cout << "  [L-Click]   Queue Simulation Task" << std::endl;
-  std::cout << "  [Wheel]     Zoom In/Out" << std::endl;
-  std::cout << "  [R/M-Drag]  Pan View" << std::endl;
-  std::cout << "  [ESC/Q]     Quit" << std::endl;
-  std::cout << "==============================================\n" << std::endl;
-
-  cv::namedWindow("Grid Feature Extractor - Interactive", cv::WINDOW_NORMAL);
-  cv::setMouseCallback("Grid Feature Extractor - Interactive", onMouse, NULL);
-
-  updateDisplay();
-
-  while (true) {
-    if(g_display_map.rows > 0 && g_display_map.cols > 0)
-        cv::imshow("Grid Feature Extractor - Interactive", g_display_map);
-    char key = (char)cv::waitKey(30); // 30ms 刷新
-    if (key == 27 || key == 'q')
-      break;
+  // 等待任务完成
+  while (g_finished_tasks < g_total_tasks) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
   g_running = false;
   g_queue_cv.notify_all();
-  if (worker.joinable())
-    worker.join();
+  for (auto &w : workers) {
+    if (w.joinable()) w.join();
+  }
 
-  std::cout << "[Grid] Session closed." << std::endl;
+  std::cout << "\n[Grid] All simulations finished. Saved to " << g_output_dir << std::endl;
   return 0;
 }
+
