@@ -25,8 +25,9 @@ TOPIC_CLOUD = '/cloud_registered_body'
 TOPIC_ODOM = '/Odometry'
 
 # --- 关键帧配置 ---
-KEYFRAME_DIST = 0.2            # 关键帧距离阈值 (米)
+KEYFRAME_DIST = 2.0            # 关键帧距离阈值 (米)
 KEYFRAME_ANGLE_DEG = 10.0      # 关键帧角度阈值 (度)
+MAX_FRAMES = 3400              # 最大生成的帧数，超过后停止处理
 
 def load_lidar_config(path):
     with open(path, 'r') as f:
@@ -154,6 +155,10 @@ def main():
     print(f"Starting to process bag for HBA: {BAG_PATH}")
 
     while reader.has_next():
+        if keyframe_count >= MAX_FRAMES:
+            print(f"\nReached MAX_FRAMES ({MAX_FRAMES}). Stopping bag processing.")
+            break
+
         (topic, data, t_ns) = reader.read_next()
         current_time_s = (t_ns - bag_start_time_ns) / 1e9
         

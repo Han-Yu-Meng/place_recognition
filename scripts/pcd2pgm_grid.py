@@ -11,7 +11,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(BASE_DIR, DATASET_NAME)
 
 # 输入/输出文件路径
-INPUT_MAP_PATH = os.path.join(DATASET_ROOT, 'global_map_dense.pcd')
+INPUT_MAP_PATH = os.path.join(DATASET_ROOT, 'global_map.pcd')
 OUTPUT_PGM_PATH = os.path.join(DATASET_ROOT, 'global_map.pgm')
 OUTPUT_PNG_PATH = os.path.join(DATASET_ROOT, 'global_map.png')
 OUTPUT_GROUND_PNG_PATH = os.path.join(DATASET_ROOT, 'ground_height.png')
@@ -20,13 +20,13 @@ OUTPUT_YAML_PATH = os.path.join(DATASET_ROOT, 'global_map.yaml')
 MAP_RESOLUTION = 0.05      # 地图分辨率 (米/像素)
 
 # --- 1. 绝对高度过滤 (一刀切掉天空和地下) ---
-ABS_Z_MIN = -1.0           # 绝对最小高度 (过滤地下噪点/多径反射)
-ABS_Z_MAX = 3.0            # 绝对最大高度 (直接切掉高于3米的屋檐、天花板、树冠)
+ABS_Z_MIN = -2.0           # 绝对最小高度 (过滤地下噪点/多径反射)
+ABS_Z_MAX = 5.0            # 绝对最大高度 (直接切掉高于3米的屋檐、天花板、树冠)
 
 # --- 2. 相对高度与地面校验 (核心逻辑) ---
 MIN_OBS_HEIGHT = 0.3       # 障碍物最小相对高度(米)，高于局部地面0.3米才算障碍物
-MAX_OBS_HEIGHT = 2.5       # 障碍物最大相对高度(米)，低于局部地面2.0米
-MAX_ELEVATION_CHANGE = 2.0 # ★ 允许的最大地形起伏差。如果局部地面比全局地面高出 1.5m，则认为它是悬空物(如绳索)，而非地面！
+MAX_OBS_HEIGHT = 5.0       # 障碍物最大相对高度(米)，低于局部地面2.0米
+MAX_ELEVATION_CHANGE = 10.0 # ★ 允许的最大地形起伏差。如果局部地面比全局地面高出 1.5m，则认为它是悬空物(如绳索)，而非地面！
 
 # --- 3. 噪点滤波配置 ---
 THRE_RADIUS = 0.5          # 半径滤波器半径
